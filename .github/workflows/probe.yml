@@ -1,0 +1,36 @@
+name: probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          python3 - <<'PY'
+          import json, re, urllib.request
+          UA = {"User-Agent": "Mozilla/5.0"}
+          def get(u, enc="utf-8"):
+              try:
+                  r = urllib.request.urlopen(urllib.request.Request(u, headers=UA), timeout=20)
+                  b = r.read(); print(f"[OK] status={r.status} bytes={len(b)}")
+                  return b.decode(enc, "replace")
+              except Exception as e:
+                  print(f"[FAIL] {type(e).__name__}: {e}"); return None
+          print("== 1. 시세 polling ==")
+          t = get("https://polling.finance.naver.com/api/realtime/domestic/stock/005930,000660,069500")
+          if t: print(json.dumps(json.loads(t), ensure_ascii=False, indent=1)[:2500])
+          print("== 2. 일봉 fchart ==")
+          t = get("https://fchart.stock.naver.com/sise.nhn?symbol=005930&timeframe=day&count=5&requestType=0")
+          if t: print(t[:600])
+          print("== 3. 시가총액 페이지 (EUC-KR) ==")
+          t = get("https://finance.naver.com/sise/sise_market_sum.naver?sosok=0&page=1", "euc-kr")
+          if t:
+              c = list(dict.fromkeys(re.findall(r'code=(\d{6})', t)))
+              print("종목수", len(c), c[:5], "005935포함", '005935' in c)
+              m = re.search(r'code=005930[^>]*>([^<]+)<', t)
+              print("한글확인:", m.group(1) if m else "미발견")
+          print("== 4. ETF 목록 ==")
+          t = get("https://finance.naver.com/api/sise/etfItemList.nhn")
+          if t:
+              try: print("ETF수", len(json.loads(t)["result"]["etfItemList"]))
+              except Exception as e: print("파싱실패", e)
+          PY

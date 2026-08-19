@@ -380,7 +380,7 @@ def test_반영_후_건수가_줄면_쓰지_않고_예외로_죽는다(monkeypat
     # apply() 자체가 미래에 버그로 항목을 잃어버리는 상황을 흉내낸다 —
     # 위의 C1/normalize 가드는 전부 통과한 뒤에도 최후의 저지선이 있는지
     # 확인한다.
-    monkeypatch.setattr(intake, "apply", lambda state, req: models.empty_state())
+    monkeypatch.setattr(intake, "apply", lambda state, req, changed_id=None: models.empty_state())
     쓴것 = []
     monkeypatch.setattr(intake.gh, "write_json", lambda *a, **k: 쓴것.append(a))
     monkeypatch.setenv("ISSUE_BODY", BODY)
@@ -575,3 +575,132 @@ def test_amend_커밋_메시지에_고친_기록의_이름과_id가_들어간다
     assert "삼성전자" in captured["message"]
     assert "20260819-005930" in captured["message"]
     assert captured["message"].startswith("amend:")
+
+
+# ---------------------------------------------------------------------------
+# Task 15 재검토(F1) — buy:{} 중첩을 깜빡한 가장 흔한 오타가 "이미
+# 반영되어 있습니다"(rc=4)로 조용히 닫히던 결함. intake.main() 을 통해서
+# 실제 워크플로가 어떤 코멘트를 달지 그대로 확인한다.
+# ---------------------------------------------------------------------------
+
+def test_amend에서_buy_중첩을_깜빡하면_이미반영이_아니라_입력거부다(monkeypatch):
+    monkeypatch.setattr(intake.gh, "read_json",
+                        lambda *a, **k: (기존_삼성, "sha"))
+    쓴것 = []
+    monkeypatch.setattr(intake.gh, "write_json", lambda *a, **k: 쓴것.append(a))
+    # buy:{"price":250000} 이 아니라 최상위에 price 를 바로 적은 흔한 실수.
+    buy_중첩_깜빡 = ('```json\n{"op":"amend","id":"20260819-005930","was":"005930",'
+                   '"price":250000}\n```')
+    monkeypatch.setenv("ISSUE_BODY", buy_중첩_깜빡)
+    # F1 이전에는 이 요청이 아무 필드도 못 알아채 "아무것도 안 바뀜" →
+    # rc=4("이미 반영되어 있습니다")로 끝났다 — 사용자는 파일이 이미
+    # 맞는 값이라고 믿고 손편집으로 돌아갔을 것이다.
+    assert intake.main() == 2
+    assert 쓴것 == []
+
+
+# ---------------------------------------------------------------------------
+# Task 15 재검토(F3) — was_price 불일치는 intake.main() 에서도 입력거부(2).
+# ---------------------------------------------------------------------------
+
+def test_amend에서_was_price가_불일치하면_2를_반환한다(monkeypatch):
+    monkeypatch.setattr(intake.gh, "read_json",
+                        lambda *a, **k: (기존_삼성, "sha"))
+    쓴것 = []
+    monkeypatch.setattr(intake.gh, "write_json", lambda *a, **k: 쓴것.append(a))
+    틀린_가격 = ('```json\n{"op":"amend","id":"20260819-005930","was":"005930",'
+              '"was_price":999999,"memo":"고침"}\n```')
+    monkeypatch.setenv("ISSUE_BODY", 틀린_가격)
+    assert intake.main() == 2
+    assert 쓴것 == []
+
+
+# ---------------------------------------------------------------------------
+# 리뷰가 명시적으로 요청한 누락 테스트 — 여러 레코드 파일에서의 amend,
+# exit 패치, 최상위 부가 키 생존을 intake.main() 을 통해 겨눈다.
+# ---------------------------------------------------------------------------
+
+기존_다건 = {"schema": 1, "positions": [
+    {"id": "20260801-000660", "code": "000660", "name": "SK하이닉스",
+     "buys": [{"date": "2026-08-01", "price": 200000}],
+     "exits": [], "adjustments": [], "status": "open",
+     "source": "수동", "memo": "메모1", "signal_date": None},
+    {"id": "20260819-005930", "code": "005930", "name": "삼성전자",
+     "buys": [{"date": "2026-08-19", "price": 247500}],
+     "exits": [], "adjustments": [], "status": "open",
+     "source": "종가베팅", "memo": "눌림", "signal_date": "2026-08-18"},
+    {"id": "20260805-035420", "code": "035420", "name": "NAVER",
+     "buys": [{"date": "2026-08-05", "price": 210000}],
+     "exits": [], "adjustments": [], "status": "open",
+     "source": "수동", "memo": "", "signal_date": None},
+]}
+
+
+def test_amend은_여러_기록_중_대상만_고치고_형제는_바이트단위로_그대로다(monkeypatch):
+    # 지금까지의 amend 테스트는 전부 레코드 1개짜리 파일만 썼다 — 가장
+    # 다루기 까다로운 부분(어느 기록이 바뀌었는지 정확히 골라내는 것)이
+    # 사실상 검증 안 된 채로 남아 있었다. 3건짜리 파일로 직접 겨눈다.
+    import copy as _copy
+    원본 = _copy.deepcopy(기존_다건)
+    monkeypatch.setattr(intake.gh, "read_json", lambda *a, **k: (기존_다건, "sha"))
+    captured = {}
+
+    def 가짜_쓰기(path, body, sha, message):
+        captured["body"] = body
+
+    monkeypatch.setattr(intake.gh, "write_json", 가짜_쓰기)
+    monkeypatch.setenv("ISSUE_BODY", AMEND_BODY)   # id=20260819-005930, memo→"고침"
+    assert intake.main() == 0
+    by_id = {p["id"]: p for p in captured["body"]["positions"]}
+    assert len(by_id) == 3
+    assert by_id["20260819-005930"]["memo"] == "고침"
+    for sib_id in ("20260801-000660", "20260805-035420"):
+        원본_항목 = next(p for p in 원본["positions"] if p["id"] == sib_id)
+        assert by_id[sib_id] == 원본_항목   # 형제 기록은 완전히 그대로
+
+
+기존_닫힌 = {"schema": 1, "positions": [
+    {"id": "20260819-005930", "code": "005930", "name": "삼성전자",
+     "buys": [{"date": "2026-08-19", "price": 247500}],
+     "exits": [{"date": "2026-08-25", "price": 260000, "reason": "목표가"}],
+     "adjustments": [], "status": "closed",
+     "source": "종가베팅", "memo": "눌림", "signal_date": "2026-08-18"},
+]}
+
+EXIT_AMEND_BODY = ('```json\n{"op":"amend","id":"20260819-005930","was":"005930",'
+                    '"exit":{"price":265000,"reason":"손절"}}\n```')
+
+
+def test_amend의_exit_패치가_intake_main을_통해_반영된다(monkeypatch):
+    monkeypatch.setattr(intake.gh, "read_json", lambda *a, **k: (기존_닫힌, "sha"))
+    captured = {}
+
+    def 가짜_쓰기(path, body, sha, message):
+        captured["body"] = body
+
+    monkeypatch.setattr(intake.gh, "write_json", 가짜_쓰기)
+    monkeypatch.setenv("ISSUE_BODY", EXIT_AMEND_BODY)
+    assert intake.main() == 0
+    e = captured["body"]["positions"][0]["exits"][0]
+    assert e == {"date": "2026-08-25", "price": 265000, "reason": "손절"}
+    assert captured["body"]["positions"][0]["status"] == "closed"   # amend 는 status 를 안 건드린다
+
+
+def test_amend_후에도_최상위_부가_키는_살아있다(monkeypatch):
+    기존 = {"schema": 1, "positions": [
+        {"id": "20260819-005930", "code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-08-19", "price": 247500}],
+         "exits": [], "adjustments": [], "status": "open",
+         "source": "종가베팅", "memo": "눌림", "signal_date": "2026-08-18"},
+    ], "cash": 5000000, "watchlist": ["035420"]}
+    monkeypatch.setattr(intake.gh, "read_json", lambda *a, **k: (기존, "sha"))
+    captured = {}
+
+    def 가짜_쓰기(path, body, sha, message):
+        captured["body"] = body
+
+    monkeypatch.setattr(intake.gh, "write_json", 가짜_쓰기)
+    monkeypatch.setenv("ISSUE_BODY", AMEND_BODY)
+    assert intake.main() == 0
+    assert captured["body"]["cash"] == 5000000
+    assert captured["body"]["watchlist"] == ["035420"]

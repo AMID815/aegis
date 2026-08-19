@@ -676,3 +676,194 @@ def test_amend_결과는_정규화해도_그대로다():
     out = models.apply_amend(d, {
         "id": "20260819-005930", "was": "005930", "memo": "고침"})
     assert models.normalize(out) == out
+
+
+# ── Task 15 재검토(F1~F3) — 코드리뷰 재검토에서 지적된 결함 ────────────────
+#
+# F1: 값 필드가 전부 선택이라(패치니까), 오타난 키는 검증할 대상 자체가
+# 없어 조용히 무시되고 "아무것도 안 바뀜" → AlreadyApplied(rc=4) 로 끝난다.
+# 가장 흔한 실수(buy:{...} 중첩을 깜빡하고 최상위에 price 를 적는 것)가
+# "이미 반영되어 있습니다"로 조용히 닫혀서, amend 가 없애려는 손편집 복귀
+# 루프를 오히려 만든다. 화이트리스트로 막는다(intake.main() 을 통한
+# 종료코드 확인은 test_intake.py 에 있다).
+
+
+@pytest.mark.parametrize("bad_req", [
+    {"price": 250000},                    # buy 중첩을 깜빡함(가장 흔한 실수)
+    {"date": "2026-08-18"},               # 위와 같은 이유, date 버전
+    {"buys": {"price": 250000}},          # buy 대신 buys 오타
+    {"exlt": {"price": 260000}},          # exit 오타
+    {"nmae": "SK하이닉스"},                # name 오타
+    {"momo": "고침"},                      # memo 오타
+])
+def test_amend은_모르는_필드를_조용히_무시하지_않고_거부한다(bad_req):
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    req = {"id": "20260819-005930", "was": "005930"}
+    req.update(bad_req)
+    with pytest.raises(models.RejectedError, match="모르는 필드"):
+        models.apply_amend(d, req)
+
+
+def test_amend은_buy_안의_모르는_필드를_거부한다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    with pytest.raises(models.RejectedError, match="모르는 필드"):
+        models.apply_amend(d, {
+            "id": "20260819-005930", "was": "005930", "buy": {"pricee": 250000}})
+
+
+def test_amend은_exit_안의_모르는_필드를_거부한다():
+    d = _닫힌_상태()
+    with pytest.raises(models.RejectedError, match="모르는 필드"):
+        models.apply_amend(d, {
+            "id": "20260819-005930", "was": "005930", "exit": {"reasonn": "손절"}})
+
+
+def test_amend은_알려진_필드는_전부_받는다():
+    # 화이트리스트가 실제로 쓰는 모든 필드를 막지 않는지 확인한다.
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    out = models.apply_amend(d, {
+        "id": "20260819-005930", "was": "005930", "was_price": 247500,
+        "code": "005930", "name": "삼성전자", "source": "수동", "memo": "고침",
+        "signal_date": "2026-08-19", "buy": {"price": 247500, "date": "2026-08-19"}})
+    assert out["positions"][0]["memo"] == "고침"
+
+
+# F2: normalize() 는 exits 가 *list 인지* 만 보고 원소 모양은 안 보며,
+# signal_date 는 아예 검사하지 않는다. apply_buy/apply_sell 은 저장된 이
+# 값들을 안 읽어서 지금까지 드러나지 않았는데, amend 의 순서 가드는 이
+# 요청이 exit/signal_date 를 안 건드려도(메모만 고쳐도) 항상 이 값들을
+# 읽는다 — 손편집이 심어놓은 손상이 TypeError/KeyError 로 그대로 새어나가
+# intake.py 의 에러 계약(2/3/4)을 벗어난다.
+
+def _저장된_손상_상태(exits=None, signal_date=None, status="open"):
+    raw = {"schema": 1, "positions": [
+        {"code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-08-19", "price": 247500}],
+         "status": status, "memo": "눌림"},
+    ]}
+    if exits is not None:
+        raw["positions"][0]["exits"] = exits
+        raw["positions"][0]["status"] = "closed"
+    if signal_date is not None:
+        raw["positions"][0]["signal_date"] = signal_date
+    return models.normalize(raw)
+
+
+@pytest.mark.parametrize("bad_exits", [
+    ["garbage"],                              # 원소가 dict 조차 아님
+    [{}],                                     # date 키가 없음
+    [{"date": 5}],                            # date 가 문자열이 아님
+    [{"date": "2026-08-20", "price": "많이"}],  # price 가 숫자가 아님
+])
+def test_amend에서_저장된_exits가_손상되면_TypeError_대신_거부한다(bad_exits):
+    d = _저장된_손상_상태(exits=bad_exits)
+    # memo 만 고치는 요청도 exits 순서 가드를 항상 지나가므로 크래시 없이
+    # RejectedError(rc=2) 로 끝나야 한다.
+    with pytest.raises(models.RejectedError):
+        models.apply_amend(d, {
+            "id": "20260819-005930", "was": "005930", "memo": "고침"})
+
+
+def test_amend에서_저장된_signal_date가_손상되면_TypeError_대신_거부한다():
+    d = _저장된_손상_상태(signal_date=20260818)   # 문자열이 아니라 숫자
+    with pytest.raises(models.RejectedError):
+        models.apply_amend(d, {
+            "id": "20260819-005930", "was": "005930", "memo": "고침"})
+
+
+def test_amend에서_정상_저장값은_손상_가드에_걸리지_않는다():
+    # 위 가드가 정상 케이스까지 막지 않는지 회귀 확인.
+    d = _저장된_손상_상태(
+        exits=[{"date": "2026-08-25", "price": 260000, "reason": "목표가"}],
+        signal_date="2026-08-18")
+    out = models.apply_amend(d, {
+        "id": "20260819-005930", "was": "005930", "memo": "고침"})
+    assert out["positions"][0]["memo"] == "고침"
+
+
+# 손편집으로 두 기록이 같은 id 를 갖게 됐을 때 "먼저 찾은 걸 고친다"는
+# 조용한 오동작 대신 드러나게 거부한다(코드리뷰 minor).
+def test_amend은_저장된_id가_중복되면_거부한다():
+    raw = {"schema": 1, "positions": [
+        {"id": "20260819-005930", "code": "005930", "name": "A",
+         "buys": [{"date": "2026-08-19", "price": 100000}]},
+        {"id": "20260819-005930", "code": "005930", "name": "B",
+         "buys": [{"date": "2026-08-19", "price": 200000}]},
+    ]}
+    d = models.normalize(raw)
+    with pytest.raises(models.RejectedError):
+        models.apply_amend(d, {"id": "20260819-005930", "was": "005930", "memo": "x"})
+
+
+# F3: id 는 YYYYMMDD-코드 라서 match["code"] 는 사실 id 접미사 그 자체다 —
+# was 단독으로는 "같은 코드, 다른 날짜에 산 기록"을 구분 못 한다. buy.date
+# 를 amend 로 옮기면 옛 (날짜+코드) id 가 비고, 그 자리를 정말 새 매수가
+# 다시 채우면, 그 사이 떠 있던 낡은 amend 이슈가 was(코드) 만으로 통과해
+# 엉뚱한(새) 기록을 고치는 사고로 이어진다. id 로부터 유도되지 않는
+# was_price 로 이 재사용 사고를 막는다.
+
+def test_amend에서_was_price가_일치하면_통과한다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    out = models.apply_amend(d, {
+        "id": "20260819-005930", "was": "005930", "was_price": 247500, "memo": "고침"})
+    assert out["positions"][0]["memo"] == "고침"
+
+
+def test_amend에서_was_price가_불일치하면_거부한다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    with pytest.raises(models.RejectedError):
+        models.apply_amend(d, {
+            "id": "20260819-005930", "was": "005930", "was_price": 999999, "memo": "고침"})
+
+
+def test_amend은_was_price_없이도_동작한다():
+    # 하위 호환 — 손으로 쓴 페이로드는 was_price 를 안 보내도 여전히 된다.
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    out = models.apply_amend(d, {
+        "id": "20260819-005930", "was": "005930", "memo": "고침"})
+    assert out["positions"][0]["memo"] == "고침"
+
+
+def test_amend에서_was_price는_타입만_다른_값도_같은_값으로_본다():
+    # was_price 도 _price 를 거쳐 정규화한 뒤 비교한다 — 247500 vs 247500.0.
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    out = models.apply_amend(d, {
+        "id": "20260819-005930", "was": "005930", "was_price": 247500.0, "memo": "고침"})
+    assert out["positions"][0]["memo"] == "고침"
+
+
+def test_amend은_was_price로_id_재사용_사고를_막는다():
+    # 리뷰에서 실측 재현된 시나리오를 그대로 고정한다.
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    # 원본 기록의 매입일을 08-18 로 옮긴다 — "20260819-005930" id 가 빈다.
+    d = models.apply_amend(d, {
+        "id": "20260819-005930", "was": "005930", "was_price": 247500,
+        "buy": {"date": "2026-08-18"}})
+    assert [p["id"] for p in d["positions"]] == ["20260818-005930"]
+    # 그 사이 정말 새 매수가 정확히 그 자리(08-19, 005930)를 다시 채운다 —
+    # 가격은 원본과 다르다(현실적인 시나리오: 완전히 별개의 매매).
+    d = models.apply_buy(d, {
+        "code": "005930", "name": "삼성전자", "price": 300000, "date": "2026-08-19"})
+    assert sorted(p["id"] for p in d["positions"]) == \
+        ["20260818-005930", "20260819-005930"]
+    # 낡은 이슈(원본을 겨눴던, was_price=247500)가 이제 도착한다. was(코드)
+    # 만 봤다면 그대로 통과해 "새 매수"(가격 300000)를 잘못 고쳤을 것이다.
+    with pytest.raises(models.RejectedError):
+        models.apply_amend(d, {
+            "id": "20260819-005930", "was": "005930", "was_price": 247500,
+            "memo": "낡은 이슈"})
+    # was_price 를 안 주면(구형 페이로드) 이 사고를 못 막는다는 것도 함께
+    # 확인한다 — was_price 가 실제로 방어선 역할을 한다는 대조군.
+    d2 = models.apply_amend(d, {
+        "id": "20260819-005930", "was": "005930", "memo": "낡은 이슈(was_price 없음)"})
+    새매수 = next(p for p in d2["positions"] if p["id"] == "20260819-005930")
+    assert 새매수["memo"] == "낡은 이슈(was_price 없음)"
+    assert 새매수["buys"][0]["price"] == 300000   # 여전히 "새 매수" 그 기록이다

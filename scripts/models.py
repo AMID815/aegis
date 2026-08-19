@@ -252,11 +252,32 @@ def apply_sell(state: dict, req: dict) -> dict:
     return state
 
 
-def apply_amend(state: dict, req: dict) -> dict:
+# amend 값 필드 화이트리스트(F1). 값 필드가 전부 선택(패치니까)이라, 오타난
+# 키는 검증할 대상 자체가 없어 조용히 무시되고 "아무것도 안 바뀜" →
+# AlreadyApplied(rc=4) 로 끝난다 — 가장 흔한 실수(buy:{...} 중첩을 깜빡하고
+# 최상위에 price 를 적는 것)가 "이미 반영되어 있습니다"로 조용히 닫혀서
+# 사용자가 파일이 이미 맞다고 믿고 손편집으로 돌아가게 만든다. amend 가
+# 없애려는 바로 그 루프라 buy/sell 처럼 "필수 필드 없으면 크게 거부"가 안
+# 통하는 이 연산에서는 화이트리스트로 대신 막는다. extract() 가 이미
+# "json 블록이 여럿이면 추측하지 않고 거부"하는 태도를 취하고 있어서
+# 일관적이다.
+_AMEND_FIELDS = frozenset({
+    "op", "id", "was", "was_price", "code", "name", "source", "memo",
+    "signal_date", "buy", "exit"})
+_AMEND_BUY_FIELDS = frozenset({"price", "date"})
+_AMEND_EXIT_FIELDS = frozenset({"price", "date", "reason"})
+
+
+def apply_amend(state: dict, req: dict, changed_id: list | None = None) -> dict:
     """기존 기록 하나를 고친다 — **패치**다, 교체가 아니다(Task 15, 구현계획.md).
 
     페이로드에 없는 키는 안 바뀐다. `exits` 를 언급하지 않으면 `exits` 는
     그대로 남는다 — 교체로 만들면 매도 기록이 통째로 사라지는 경로가 생긴다.
+
+    `changed_id` 에 빈 리스트를 넘기면 반영 후 이 기록의 최종 `id` 를
+    담아준다 — intake.py 가 커밋 메시지를 조립할 때 "무엇이 바뀌었는지"를
+    상태 리스트 앞뒤를 비교해 추측하지 않고 이 채널로 직접 받게 하기
+    위함이다(`normalize(raw, dropped=None)` 의 out-parameter 관례와 같다).
 
     설계 그대로 지키는 규칙:
     1. `was` 가 대상 기록의 **현재** `code` 와 다르면 거부한다. `id` 만으로
@@ -268,41 +289,125 @@ def apply_amend(state: dict, req: dict) -> dict:
        `amend` 로 매도를 새로 만들지 않는다. 그건 `sell` 의 일이다.
     4. 정규화된 값까지 비교해서 아무것도 안 바뀌면 `AlreadyApplied` —
        빈 커밋을 만들지 않는다. "247500" 과 "247500.0" 처럼 `_price` 가
-       정규화하면 같아지는 값은 "바뀐 것"으로 치지 않는다 — 비교를
-       패치 **적용 전 JSON** 이 아니라 **적용 후 정규화된 필드**로 하기
-       때문에 저절로 이렇게 된다.
+       정규화하면 같아지는 값은 "바뀐 것"으로 치지 않는다.
     5. 값 검증은 `buy`/`sell` 과 완전히 같은 헬퍼(`_code`/`_date`/`_price`/
        `_text`)를 쓴다. `amend` 만 느슨하면 가드를 우회하는 뒷문이 된다.
 
-    설계 문서에 없어서 이 구현이 코드리뷰로 추가한 두 가지:
-    - `code` 를 고치면서 `name` 을 안 주면 거부한다. 패치 규칙(1)을 곧이
-      곧대로 따르면 종목만 바뀌고 표시 이름은 이전 종목 이름으로 남는데,
-      그건 기록이 거짓말을 하는 것과 같다 — "고친다"는 취지에 어긋난다.
-    - 패치를 전부 적용한 뒤, 최종 매수일이 최종 매도일보다 늦으면 거부한다.
-      `apply_sell` 은 매도 **시점**에 이 순서를 지키지만, `amend` 가 나중에
-      `buy.date` 나 `exit.date` 를 따로 옮기면 그 가드를 건너뛸 수 있다 —
-      같은 불변식을 여기서도 지킨다.
+    설계 문서에 없어서 이 구현이 코드리뷰로 추가한 것들:
+    - **모르는 필드는 거부한다** (`_AMEND_FIELDS` 화이트리스트, `buy`/`exit`
+      내부도 각각 `_AMEND_BUY_FIELDS`/`_AMEND_EXIT_FIELDS` 로). 이유는 위
+      모듈 상수 옆 주석 참조 — "조용히 무시 → 이미 반영됨(rc=4)"이 손편집
+      복귀 루프로 이어지는 걸 막는다.
+    - `code` 를 고치면서 `name` 을 안 주면 거부한다. 안 그러면 종목만
+      바뀌고 표시 이름은 이전 종목 이름으로 남아 기록이 거짓말을 한다.
+    - 패치를 전부 적용한 뒤, 최종 매수일이 최종 매도일보다 늦으면 거부한다
+      — `apply_sell` 이 매도 **시점**에 지키는 순서를, amend 가 나중에
+      `buy.date`/`exit.date` 를 따로 옮겨 우회하지 못하게 한다.
+    - **저장된 값 자체가 손상됐는지도 확인한다.** `normalize()` 는 `exits`
+      가 *list 인지* 만 보고 원소 모양은 안 보며, `signal_date` 는 아예
+      검사하지 않는다(있으면 손 안 댐). `apply_buy`/`apply_sell` 은 저장된
+      이 두 필드를 읽지 않아 지금까지 드러나지 않았던 노출인데, amend 는
+      이 값들을 이번 요청이 건드리든 안 건드리든(메모만 고치는 요청이라도)
+      항상 순서 비교에 쓴다 — 손편집이 심어놓은 손상(문자열 원소, `date`
+      키 없는 exits 항목, 숫자 `signal_date` 등)이 그대로면 `TypeError`/
+      `KeyError` 가 새어나가 intake.py 의 에러 계약(2/3/4)을 벗어난다.
+      구조적으로는 `normalize()` 가 이걸 `dropped` 로 걸러 모든 연산에서
+      rc=3 이 되게 하는 게 더 정확한 자리다(이미 하는 "exits 가 list 인지"
+      검사와 대칭) — 하지만 그건 기존 동작을 바꾸는 더 큰 변경이라 이번
+      병합에는 안 담는다. 여기서는 amend 가 실제로 읽는 값만 지역적으로,
+      `RejectedError`(rc=2)로 막는다.
+    - **`was_price`(선택).** `id` 는 `YYYYMMDD-코드` 라서 `match["code"]`
+      는 사실 `id` 접미사 그 자체다 — `was` 단독으로는 "같은 코드, 다른
+      날짜에 산 기록"을 구분 못 한다. 구체적으로: 어떤 기록의 `buy.date`
+      를 amend 로 옮기면 옛 (날짜+코드) 조합의 id 가 비고, 그 뒤 같은
+      코드로 정말 새 매수가 그 정확한 조합을 다시 채우면, 그 사이 떠 있던
+      낡은 amend 이슈(옛 id 를 겨눈)가 제출됐을 때 `was`(코드) 는 여전히
+      일치해서 **엉뚱한(새) 기록을 고치는 사고**로 이어진다(실측 재현됨).
+      `id` 로부터 유도되지 않는 값(매입가)을 선택 필드로 받아 저장값과
+      대조하면 이 재사용 사고를 실용적으로 막는다 — 새 매수가 우연히
+      같은 코드+날짜+가격을 전부 재현할 확률은 사실상 없다. 안 보내도
+      (손으로 쓴 페이로드) 여전히 동작한다 — 페이지(가격을 이미 렌더링해서
+      알고 있다)는 항상 보내야 한다.
 
     `signal_date` 도 최상위 키로 고칠 수 있다 — 설계 페이로드 예시에는
-    없지만, 매수 시 검증하는 필드(코드리뷰로 지적된 gap)를 amend 로는
-    못 고치는 게 오히려 비대칭이라 넣었다. `apply_buy` 와 같은 규칙
-    (매수일보다 늦으면 거부)을 그대로 적용한다.
+    없지만, 매수 시 검증하는 필드를 amend 로는 못 고치는 게 오히려
+    비대칭이라 넣었다. `apply_buy` 와 같은 규칙(매수일보다 늦으면 거부)을
+    그대로 적용한다.
 
     `adjustments` 는 건드리지 않는다 — 지금 이 필드를 쓰는 쪽이 없고
     (아무도 안 씀), 페이지도 이 필드가 있는 기록은 가격 파생값 계산 자체를
     건너뛴다. amend 페이로드에 이 필드의 모양이 정의돼 있지 않은데 여기서
     임의로 스키마를 만들면 아무도 합의하지 않은 걸 새로 만드는 셈이다.
+
+    ── 이 연산이 못 고치는 것(잔여 한계) ──────────────────────────────────
+    - `status` 는 amend 로 못 바꾼다. `exits` 도 amend 로 새로 못 만들고
+      (그건 `sell` 의 일) 못 지운다. 그래서 app.js 가 이미 가정하고 있는
+      두 불일치 상태 — `status="closed"` 인데 `exits=[]`, 그리고 `exits`
+      는 있는데 `status="open"` — 는 여전히 손편집으로만 고칠 수 있다.
+      완전히 스푸리어스한(있어서는 안 될) 기록을 지우는 것도 마찬가지다.
+      즉 amend 는 "손편집이 완전히 사라졌다"를 보장하지 않는다 — 가장
+      흔한 사고(값 오타)만 없앤다.
+    - `was_price` 는 id 재사용 사고의 실용적인 확률을 낮추지만 구조적으로
+      0 은 아니다(우연히 같은 코드+날짜+가격의 새 매수가 있으면 뚫린다).
+    - 매도일 순서 가드는 `exits[0]` 만 본다. 정상 경로는 `buys`/`exits`
+      모두 원소가 최대 1개라 문제없지만, 손편집으로 exits 가 여러 개면
+      (지금 어떤 연산도 만들 수 없는 모양) 재정렬을 놓칠 수 있다 — v1
+      범위 밖으로 남겨둔다.
+    - "exit 는 종결된 기록에만" 을 판단할 때 `status` 가 아니라 `exits` 가
+      비었는지로 판단한다. 정상 경로에선 둘이 항상 같이 바뀌어(apply_sell)
+      차이가 없다. `status` 기준으로 바꾸면 `status="closed"` 인데
+      `exits=[]` 인 손편집 기록에서 `new["exits"][0]` 이 없어 IndexError
+      가 나므로, "패치할 exits[0] 이 실제로 있는가"를 보는 지금 기준을
+      의도적으로 유지한다.
     """
+    unknown = set(req) - _AMEND_FIELDS
+    if unknown:
+        raise RejectedError(f"모르는 필드: {sorted(unknown)}")
+
     target_id = req.get("id")
     was = req.get("was")
+    was_price = req.get("was_price")
     state = normalize(state)
-    idx = next((i for i, p in enumerate(state["positions"]) if p["id"] == target_id), None)
-    if idx is None:
+    matches = [i for i, p in enumerate(state["positions"]) if p["id"] == target_id]
+    if not matches:
         raise RejectedError(f"고칠 대상 없음: {target_id!r}")
+    if len(matches) > 1:
+        # 정상 경로로는 절대 안 생긴다 — id 유일성은 이 함수(충돌 검사)와
+        # apply_buy(중복 id 거부)가 항상 지킨다. 손편집으로 두 기록이 같은
+        # id 를 갖게 됐다면 "먼저 찾은 걸 고친다"는 조용한 오동작 대신
+        # 드러나게 거부한다(파일이 이미 손상됐다는 신호이기도 하다).
+        raise RejectedError(f"id 가 중복 저장되어 있어 고칠 수 없음(파일 손상 의심): {target_id!r}")
+    idx = matches[0]
     match = state["positions"][idx]
     if match["code"] != was:
         raise RejectedError(
             f"코드 불일치(was) — 저장된 값과 다름: 저장={match['code']!r} 요청={was!r}")
+    if was_price is not None:
+        try:
+            was_price_norm = _price(was_price)
+        except RejectedError as exc:
+            raise RejectedError(f"was_price 형식 오류: {exc}") from exc
+        if was_price_norm != match["buys"][0]["price"]:
+            raise RejectedError(
+                "매입가 불일치(was_price) — 저장된 값과 다름: "
+                f"저장={match['buys'][0]['price']!r} 요청={was_price_norm!r}")
+
+    # 저장된 exits/signal_date 자체가 손상됐는지 확인한다(F2) — 위 docstring
+    # "저장된 값 자체가 손상됐는지도 확인한다" 참조. 이 요청이 exit/
+    # signal_date 를 안 건드려도 아래 순서 비교가 항상 이 값들을 읽는다.
+    for e in match["exits"]:
+        if not isinstance(e, dict):
+            raise RejectedError(f"저장된 exits 항목이 손상됨(dict 아님): {e!r}")
+        try:
+            _date(e.get("date"))
+            _price(e.get("price"))
+        except RejectedError as exc:
+            raise RejectedError(f"저장된 exits 항목이 손상됨: {exc}") from exc
+    if match["signal_date"] is not None:
+        try:
+            _date(match["signal_date"])
+        except RejectedError as exc:
+            raise RejectedError(f"저장된 signal_date 가 손상됨: {exc}") from exc
 
     if "code" in req and "name" not in req:
         # 패치 규칙을 곧이곧대로 따르면 code 만 바뀌고 name 은 이전 종목
@@ -327,6 +432,9 @@ def apply_amend(state: dict, req: dict) -> dict:
     if buy_patch is not None:
         if not isinstance(buy_patch, dict):
             raise RejectedError(f"buy 가 객체가 아님: {buy_patch!r}")
+        unknown_buy = set(buy_patch) - _AMEND_BUY_FIELDS
+        if unknown_buy:
+            raise RejectedError(f"buy 안에 모르는 필드: {sorted(unknown_buy)}")
         if "price" in buy_patch:
             new["buys"][0]["price"] = _price(buy_patch["price"])
         if "date" in buy_patch:
@@ -336,6 +444,9 @@ def apply_amend(state: dict, req: dict) -> dict:
     if exit_patch is not None:
         if not isinstance(exit_patch, dict):
             raise RejectedError(f"exit 가 객체가 아님: {exit_patch!r}")
+        unknown_exit = set(exit_patch) - _AMEND_EXIT_FIELDS
+        if unknown_exit:
+            raise RejectedError(f"exit 안에 모르는 필드: {sorted(unknown_exit)}")
         if not new["exits"]:
             raise RejectedError("종결되지 않은 기록에는 exit 를 줄 수 없음 — 매도는 sell 의 일")
         if "price" in exit_patch:
@@ -363,4 +474,6 @@ def apply_amend(state: dict, req: dict) -> dict:
         raise AlreadyApplied(match["id"])
 
     state["positions"][idx] = new
+    if changed_id is not None:
+        changed_id.append(new["id"])
     return state

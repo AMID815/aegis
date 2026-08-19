@@ -76,13 +76,17 @@ def extract(body: str) -> dict:
     return d
 
 
-def apply(state: dict, req: dict) -> dict:
+def apply(state: dict, req: dict, changed_id: list | None = None) -> dict:
     """req 를 state 에 반영한다. 필드별 검증은 전부 models 에 위임한다.
 
     req 에 code/price/date 등이 빠지거나 이상해도 여기서 크래시하지 않는다
     — models._code/_date/_price 가 각각 "어떤 필드가 왜 틀렸는지" 담은
     RejectedError 를 낸다(코드리뷰 포인트 3, models.py 위임 확인만 하고
     별도 검증을 추가하지 않았다).
+
+    `changed_id` 는 amend 전용 out-parameter 다(models.apply_amend 참조,
+    normalize 의 dropped 와 같은 관례) — buy/sell 은 무시한다. 기본값이
+    None 이라 기존 2-인자 호출부는 안 깨진다.
     """
     op = req.get("op")
     if op == "buy":
@@ -90,7 +94,7 @@ def apply(state: dict, req: dict) -> dict:
     if op == "sell":
         return models.apply_sell(state, req)
     if op == "amend":
-        return models.apply_amend(state, req)
+        return models.apply_amend(state, req, changed_id)
     raise models.RejectedError(f"모르는 op: {op!r}")
 
 
@@ -182,9 +186,10 @@ def main() -> int:
         print(f"[중단] 해석 불가 항목 {len(bad)}건 — 파일에 손대지 않는다: {ids}")
         return 3
     prior_count = len(state["positions"])
+    changed_id = []   # amend 전용 out-parameter — apply() 참조
 
     try:
-        out = apply(state, req)
+        out = apply(state, req, changed_id)
     except models.AlreadyApplied as e:
         # 중복 id — 이 요청은 "틀린" 게 아니라 "이미 끝난" 것이다. 2 로
         # 나가면 사용자가 "다시 제출"하다가 날짜를 바꿔서라도 통과시키기
@@ -219,20 +224,33 @@ def main() -> int:
         # 앵커로 개행이 원천 차단되지 않으므로, 이번에 amend 가 건드렸든
         # 안 건드렸든 커밋 메시지에 넣기 전에는 항상 _single_line 을
         # 거친다(리뷰 포인트 6 과 같은 이유, 출처만 다르다).
-        changed = next((new_p for old_p, new_p in zip(state["positions"], out["positions"])
-                        if old_p != new_p), None)
-        # apply()가 AlreadyApplied 를 안 냈다면(여기 도달했다면) 반드시 하나는
-        # 바뀌어 있다 — 못 찾으면 apply_amend 자체의 버그다.
-        assert changed is not None, "amend 반영됐다는데 바뀐 기록을 못 찾음 — 코드 버그"
+        #
+        # 바뀐 기록을 찾을 때 state/out 의 위치별(zip) 비교는 안 쓴다 —
+        # "amend 는 리스트 순서를 안 바꾼다"는, models 가 명시적으로
+        # 보장하지 않는 내부 구현 사실에 intake.py 가 몰래 기대는 셈이라
+        # models 쪽 리팩터에 조용히 깨질 수 있다. 대신 apply()/apply_amend
+        # 가 changed_id 로 최종 id 를 직접 알려주고, 여기서는 그 id 로
+        # out["positions"] 를 찾는다 — 명시적 계약이라 더 튼튼하다.
+        cid = changed_id[0]
+        changed = next((p for p in out["positions"] if p["id"] == cid), None)
+        if changed is None:
+            # apply()가 AlreadyApplied 를 안 냈다면(여기 도달했다면) changed_id
+            # 가 가리키는 기록이 out 안에 반드시 있어야 한다 — 없으면
+            # apply_amend 자체의 버그다. assert 는 -O 로 사라지므로 항상
+            # 살아있는 예외로 낸다.
+            raise RuntimeError(
+                f"amend 반영됐다는데 바뀐 기록을 못 찾음(id={cid!r}) — 코드 버그")
         name = _single_line(changed["name"]) or changed["code"]
         pid = _single_line(changed["id"]) or changed["code"]
         message = f"amend: {name} ({pid})"
+        commit_target = pid
     else:
         # code/date 는 이 시점에 이미 apply() 안의 _code()/_date() 를 통과했다
         # — 둘 다 글자 집합이 정규식(`\Z` 앵커, 개행 불가)으로 고정돼 있어
         # name 과 달리 커밋 메시지용 별도 정리가 필요 없다.
         name = _single_line(req.get("name")) or req.get("code")
         message = f"{op}: {name} ({req.get('date')})"
+        commit_target = req.get("code")
     try:
         gh.write_json(POSITIONS, out, sha, message)
     except RuntimeError as e:
@@ -245,11 +263,12 @@ def main() -> int:
         print(f"[오류] positions.json 쓰기 실패 — 재시도 필요, 파일 문제 아님: {e}")
         raise
     held = sum(1 for p in out["positions"] if p["status"] == models.OPEN)
-    # amend 는 req 에 code 가 없는 게 보통이다(패치 규칙 — 코드를 안 고치면
-    # 안 적는다) — 그 흔한 경우에 "반영: amend None" 처럼 찍히지 않게 위에서
-    # 이미 계산해둔(sanitize 까지 끝난) pid 를 쓴다.
-    target = pid if op == "amend" else req.get("code")
-    print(f"반영: {op} {target} — 보유 {held}건")
+    # commit_target 은 위 if/else 양쪽에서 항상 할당된다(amend 는 req 에
+    # code 가 없는 게 보통이라 — 패치 규칙 — 그 경우도 "반영: amend None"
+    # 처럼 찍히지 않게 sanitize 까지 끝난 pid 를 쓴다). op 값을 여기서 다시
+    # 비교해 변수를 고르면 "정의된 적 없을 수도 있는 변수"처럼 보여서
+    # 대신 위에서 이미 확정한 값을 그대로 쓴다.
+    print(f"반영: {op} {commit_target} — 보유 {held}건")
     return 0
 
 

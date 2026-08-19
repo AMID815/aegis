@@ -1,0 +1,26 @@
+{
+ "closes": {
+  "005930": 270000
+ },
+ "date": "2026-07-23",
+ "positions": [
+  {
+   "adjustments": [],
+   "buys": [
+    {
+     "date": "2026-08-19",
+     "price": 247500
+    }
+   ],
+   "code": "005930",
+   "exits": [],
+   "id": "20260819-005930",
+   "memo": "첫 관측 — 2026-08-19 종가 기준",
+   "name": "삼성전자",
+   "signal_date": null,
+   "source": "수동",
+   "status": "open"
+  }
+ ],
+ "price_basis": "asof-fetch"
+}

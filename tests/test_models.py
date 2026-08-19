@@ -375,3 +375,69 @@ def test_큰_정수_수정_후에도_정수값_가격은_여전히_통과한다(
 def test_큰_정수_수정_후에도_0_4는_여전히_거부한다():
     with pytest.raises(models.RejectedError):
         models._price(0.4)
+
+
+# ── 코드리뷰 G2: schema/positions 이외의 최상위 키는 보존된다 ────────────
+#
+# 고치기 전에는 normalize() 가 마지막에 {"schema": SCHEMA, "positions":
+# good} 을 새로 지어서 돌려줘서, positions.json 에 cash/updated_at/
+# watchlist 같은(아직 안 쓰지만 손으로 남길 수 있는) 다른 최상위 키가
+# 있으면 조용히 사라졌다 — rc=0, "반영했습니다"까지 나가면서.
+
+def test_모르는_최상위_키는_보존된다():
+    raw = {"schema": 1, "positions": [
+        {"code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-08-19", "price": 100000}]},
+    ], "cash": 5000000, "updated_at": "2026-08-19T15:30:00", "watchlist": ["000660"]}
+    out = models.normalize(raw)
+    assert out["cash"] == 5000000
+    assert out["updated_at"] == "2026-08-19T15:30:00"
+    assert out["watchlist"] == ["000660"]
+    assert len(out["positions"]) == 1
+
+
+def test_보존된_최상위_키는_원본과_별개_객체다():
+    raw = {"schema": 1, "positions": [], "watchlist": ["000660"]}
+    out = models.normalize(raw)
+    out["watchlist"].append("005930")
+    assert raw["watchlist"] == ["000660"]   # 원본은 안 건드린다
+
+
+def test_최상위_구조_자체가_이상하면_다른_키_보존_대상이_아니다():
+    # positions 가 아예 list 가 아니면(이 케이스는 intake.py 의 최상위
+    # 구조 가드가 애초에 normalize() 를 부르기도 전에 막는다) "이게 진짜
+    # 데이터인지 오타인지" 판단 근거가 없어 예전처럼 빈 상태만 돌아온다 —
+    # G2 의 보존 정책은 schema/positions 가 둘 다 유효할 때만 적용된다.
+    raw = {"schema": 1, "positions": "목록아님", "cash": 1000000}
+    dropped = []
+    out = models.normalize(raw, dropped)
+    assert out == models.empty_state()
+    assert len(dropped) == 1
+
+
+# ── 코드리뷰 G3: dropped 에 담기는 non-dict 항목도 dict 모양을 유지한다 ──
+#
+# 고치기 전에는 positions 배열 항목 자체가 dict 가 아니면(예: 배열이 한
+# 겹 더 들어간 손편집 실수) 그 원본을 dropped 에 그대로 넣었다.
+# intake.py 는 dropped 항목을 p.get("id") or p.get("code") 로 읽으므로,
+# 리스트 같은 non-dict 항목이 들어오면 그 호출부가 AttributeError 로
+# 죽어서 의도한 "해석 불가 항목 N건"(rc=3) 대신 예기치 못한 오류로
+# 떨어졌다.
+
+def test_배열이_한겹_더_들어간_항목도_dropped에서_dict_모양을_유지한다():
+    raw = {"schema": 1, "positions": [["array", "one", "level", "too", "deep"]]}
+    dropped = []
+    out = models.normalize(raw, dropped)
+    assert out["positions"] == []
+    assert len(dropped) == 1
+    assert isinstance(dropped[0], dict)
+    assert dropped[0].get("id") == "(알 수 없음)"   # .get() 이 죽지 않는다
+
+
+@pytest.mark.parametrize("bad_item", [["array"], "문자열", 123, None, True])
+def test_dropped_항목은_어떤_non_dict_타입이든_dict로_감싼다(bad_item):
+    dropped = []
+    models.normalize({"schema": 1, "positions": [bad_item]}, dropped)
+    assert len(dropped) == 1
+    assert isinstance(dropped[0], dict)
+    assert dropped[0].get("id") == "(알 수 없음)"

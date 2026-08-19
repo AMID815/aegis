@@ -102,6 +102,19 @@ def normalize(raw, dropped=None) -> dict:
     가드가 못 보고 지나쳐서, 기존 항목 전체가 새 항목 하나로 조용히
     덮어써진다(코드리뷰 C1 — 예: positions 배열만 잘라 고친 뒤 파일
     전체인 줄 알고 덮어쓰기).
+
+    schema/positions 이외의 최상위 키(예: cash, updated_at, watchlist —
+    아직 아무도 안 쓰지만 손으로 남긴 주석성 필드나 미래 버전이 추가할
+    필드일 수 있다)는 검증하지 않되 **보존**한다. position dict 내부의
+    낯선 키를 이미 그대로 실어 나르는 기존 정책(각 항목을 deepcopy 해서
+    통째로 들고 간다)과 대칭이다 — 이해 못 한다고 지워버리면 손편집이
+    유일한 복구 경로인 이 파일에서 사람이 남긴 값이 말없이 사라진다
+    (코드리뷰 G2). 단, 이 보존은 schema 와 positions 가 둘 다 유효할 때만
+    적용된다 — 최상위 구조 자체가 이상한 앞의 두 조기 return 은 대상이
+    아니다. 거기서는 "이게 진짜 데이터인지 오타인지"조차 이 함수가 판단할
+    근거가 없다(예: "position"(오타) 키 하나만 있는 파일이 의도된 필드인지
+    "positions" 오타인지는 알 수 없다) — 그 경우는 intake.py 의 최상위
+    구조 가드가 애초에 이 함수를 부르기 전에 막는다.
     """
     if not isinstance(raw, dict):
         if dropped is not None:
@@ -126,7 +139,16 @@ def normalize(raw, dropped=None) -> dict:
     for p in items:
         if not isinstance(p, dict):
             if dropped is not None:
-                dropped.append(p)
+                # 호출자(intake.py)는 dropped 항목을 p.get("id") or
+                # p.get("code") 로 읽는다 — dict 가 아닌 걸 그대로 넣으면
+                # (예: positions 배열 안에 배열이 한 겹 더 들어간 손편집
+                # 실수) 그 호출부가 AttributeError 로 죽어서, 의도한
+                # "해석 불가 항목 N건 — 파일에 손대지 않는다"(rc=3) 대신
+                # 워크플로가 예기치 못한 오류로 떨어진다. dropped 항목은
+                # 항상 dict 모양이어야 한다는 불변식(위 "(파일 전체)"
+                # 마커에서 이미 지킨 것과 같은 불변식)을 여기서도 지킨다
+                # (코드리뷰 G3).
+                dropped.append({"id": "(알 수 없음)", "note": f"dict 아닌 항목: {p!r}"})
             continue
         p = copy.deepcopy(p)   # 호출자가 들고 있는 원본 객체를 건드리지 않는다
         try:
@@ -174,7 +196,11 @@ def normalize(raw, dropped=None) -> dict:
         p.setdefault("source", "수동")
         p.setdefault("memo", "")
         good.append(p)
-    return {"schema": SCHEMA, "positions": good}
+    # schema/positions 이외의 키를 보존한다 — 위 docstring 참조(코드리뷰
+    # G2). deepcopy 하는 이유는 position 항목과 같다: 반환값이 raw 의
+    # 내부 객체를 그대로 공유하면 안 된다.
+    extras = {k: copy.deepcopy(v) for k, v in raw.items() if k not in ("schema", "positions")}
+    return {"schema": SCHEMA, "positions": good, **extras}
 
 
 def apply_buy(state: dict, req: dict) -> dict:

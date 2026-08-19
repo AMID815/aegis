@@ -387,3 +387,76 @@ def test_반영_후_건수가_줄면_쓰지_않고_예외로_죽는다(monkeypat
     with pytest.raises(AssertionError):
         intake.main()
     assert 쓴것 == []
+
+
+# ---------------------------------------------------------------------------
+# 코드리뷰 G1 — 최상위 구조 가드는 normalize() 의 dropped 보고에 기대지
+# 않는다(레이어 마스킹 방지)
+# ---------------------------------------------------------------------------
+
+# 리뷰가 각 레이어를 따로 되돌려 뮤테이션 테스트를 했다: intake.py 의
+# 3줄짜리 가드만 지우면 159/159 그대로 통과했다 — models.normalize() 의
+# dropped 마커가 "if bad: return 3" 경로로 여전히 잡아주기 때문이다. 즉
+# 기존 test_최상위_구조가_손상되면_... 은 "가드 OR 마커 둘 중 하나만
+# 있어도" 통과하는 테스트였지, "가드 자체가 동작한다"는 따로 고정하지
+# 못했다. 여기서는 normalize() 를 dropped 를 아예 무시하는 pass-through로
+# 바꿔치기해서(마커 계층이 사라지거나 버그가 난 상황을 흉내낸다) 가드
+# 혼자서도 막는지 확인한다 — 가드가 살아있으면 이 가짜 normalize() 는
+# 애초에 호출조차 되지 않는다(가드가 read_json 직후, normalize 호출 전에
+# 먼저 return 하므로). 가드를 지우면 이 가짜가 빈 상태를 돌려주고 bad 는
+# 계속 비어 있어, rc=0 으로 SK하이닉스 보유가 사라진 채 새 매수 하나만
+# 커밋됐을 것이다.
+def test_최상위_구조_가드는_normalize의_dropped_보고에_기대지_않는다(monkeypatch):
+    깨진_state = [{"id": "20260801-000660", "code": "000660", "name": "SK하이닉스",
+                  "buys": [{"date": "2026-08-01", "price": 200000}], "status": "open"}]
+    monkeypatch.setattr(intake.gh, "read_json", lambda *a, **k: (깨진_state, "sha"))
+    monkeypatch.setattr(intake.models, "normalize",
+                        lambda raw, dropped=None: models.empty_state())
+    쓴것 = []
+    monkeypatch.setattr(intake.gh, "write_json", lambda *a, **k: 쓴것.append(a))
+    monkeypatch.setenv("ISSUE_BODY", BODY)
+    assert intake.main() == 3
+    assert 쓴것 == []
+
+
+# ---------------------------------------------------------------------------
+# 코드리뷰 G3 (회귀) — dropped 항목이 non-dict 여도 main() 이 크래시하지
+# 않고 의도한 rc=3 진단으로 끝난다
+# ---------------------------------------------------------------------------
+
+def test_배열이_한겹_더_깊은_손상도_rc3으로_처리되고_크래시하지_않는다(monkeypatch):
+    """고치기 전에는 이 모양이 intake.py 의
+    `[p.get("id") or p.get("code") for p in bad]` 에서 AttributeError 로
+    죽어, rc=3 과 '파일에 손대지 않는다' 진단 대신 워크플로가 '예기치
+    못한 오류'(*) 로 떨어졌다."""
+    깨진 = {"schema": 1, "positions": [["array", "one", "level", "too", "deep"]]}
+    monkeypatch.setattr(intake.gh, "read_json", lambda *a, **k: (깨진, "sha"))
+    쓴것 = []
+    monkeypatch.setattr(intake.gh, "write_json", lambda *a, **k: 쓴것.append(a))
+    monkeypatch.setenv("ISSUE_BODY", BODY)
+    assert intake.main() == 3
+    assert 쓴것 == []
+
+
+# ---------------------------------------------------------------------------
+# 코드리뷰 G2 (intake 통합) — 최상위 부가 키가 라운드트립에서 살아남는다
+# ---------------------------------------------------------------------------
+
+def test_최상위_부가_키는_반영_후에도_살아있다(monkeypatch):
+    기존 = {"schema": 1, "positions": [
+        {"id": "20260801-000660", "code": "000660", "name": "SK하이닉스",
+         "buys": [{"date": "2026-08-01", "price": 200000}],
+         "exits": [], "adjustments": [], "status": "open",
+         "source": "수동", "memo": "", "signal_date": None},
+    ], "cash": 5000000, "watchlist": ["035420"]}
+    monkeypatch.setattr(intake.gh, "read_json", lambda *a, **k: (기존, "sha"))
+    captured = {}
+
+    def 가짜_쓰기(path, body, sha, message):
+        captured["body"] = body
+
+    monkeypatch.setattr(intake.gh, "write_json", 가짜_쓰기)
+    monkeypatch.setenv("ISSUE_BODY", BODY)
+    assert intake.main() == 0
+    assert captured["body"]["cash"] == 5000000
+    assert captured["body"]["watchlist"] == ["035420"]

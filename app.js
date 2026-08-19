@@ -708,29 +708,56 @@ function parsePrice(raw) {
   return Number(String(raw).replace(/[,\s]/g, ""));
 }
 
-// Task 11 계약: #q 에 고른 종목이 보유 중(open)인 코드와 일치하면 매도
-// 모드로 전환하되, 그 사실을 화면에 드러낸다. 매입 모드 복귀 시 반대로
-// 되돌린다.
-function applyMode(isSell) {
+// 매입/매도/amend 세 모드가 건드리는 요소 8개(#mode, #price-label,
+// #source-field, #form[data-mode], #submit-btn, #cancel-btn,
+// #signal-date-field, exit-* 필드 3개)를 **한 함수가 모드마다 전부**
+// 설정한다 — 리뷰 C2 이전에는 applyMode(매입/매도)와 applyModeAmend(amend)
+// 가 서로 다른 부분집합만 건드려서, updateMode() 가 amend 도중 실수로
+// 불리면(main() 끝의 가드 없는 호출 — master.json 로딩 중 버튼 클릭)
+// #mode/#price-label/... 은 매도 모드로 바뀌는데 #cancel-btn/
+// exit-*-field 는 amend 상태 그대로 남아 화면과 amendTarget 이 서로 다른
+// 이야기를 하는 상태가 됐다(실측: 화면은 "매도가"인데 실제로 제출되는
+// 값은 buy.price 로 들어감). 한 함수가 모드마다 8개 전부를 명시적으로
+// 정하면 이 종류의 부분 갱신 자체가 불가능하다.
+function applyMode(mode, opts) {
+  opts = opts || {};
   const modeEl = document.getElementById("mode");
   const label = document.getElementById("price-label");
   const srcField = document.getElementById("source-field");
   const form = document.getElementById("form");
   const btn = document.getElementById("submit-btn");
-  if (isSell) {
+  const cancelBtn = document.getElementById("cancel-btn");
+  const sigField = document.getElementById("signal-date-field");
+
+  form.dataset.mode = mode;
+
+  if (mode === "sell") {
     modeEl.hidden = false;
     modeEl.textContent = "매도 입력 — 보유 중인 종목입니다";
     label.textContent = "매도가";
     srcField.hidden = true;      // 매도에는 출처가 의미 없다
-    form.dataset.mode = "sell";
     btn.textContent = "매도 이슈 열기";
-  } else {
+    cancelBtn.hidden = true;
+    sigField.hidden = true;
+    setExitFieldsVisible(false);
+  } else if (mode === "amend") {
+    modeEl.hidden = false;
+    modeEl.textContent = "고치기 — 기존 기록을 고치는 중입니다";
+    label.textContent = "매입가";
+    srcField.hidden = false;
+    btn.textContent = "고치기 반영";
+    cancelBtn.hidden = false;
+    sigField.hidden = false;
+    setExitFieldsVisible(!!opts.hasExit);
+  } else {   // "buy" — 기본값
     modeEl.hidden = true;
     modeEl.textContent = "";
     label.textContent = "매입가";
     srcField.hidden = false;
-    form.dataset.mode = "buy";
     btn.textContent = "깃허브에서 저장";
+    cancelBtn.hidden = true;
+    sigField.hidden = true;
+    setExitFieldsVisible(false);
   }
 }
 
@@ -740,16 +767,33 @@ function updateMode() {
   // 명시한 결함). resolveCode 가 실패하면(아직 완전히 선택되지 않은
   // 입력 중) 매입 모드로 되돌린다 — 직전에 다른 보유 종목을 골랐다가
   // 지우는 중이라면 매도 모드가 그대로 남아있는 쪽이 더 위험하다.
+  //
+  // 호출하는 쪽(#q 입력 리스너, main() 끝)이 전부 amendTarget 가드를
+  // 진 채로 불러야 한다 — 리뷰 C2: main() 끝의 호출에 가드가 빠져 있어,
+  // master.json 로딩 중(await 이후) amend 로 이미 들어간 상태에서 이
+  // 함수가 다시 불리면 방금 amend 로 고르고 있던 "보유 중" 종목이 그대로
+  // findOpenPosition 에 걸려 매도 모드로 화면을 덮어썼다. 방어를 이
+  // 함수 안에도 한 번 더 둔다 — 호출부 가드가 나중에 또 빠지더라도
+  // amend 도중에는 최소한 이 함수 자체가 아무 것도 안 하게.
+  if (amendTarget) return;
   const code = resolveCode(document.getElementById("q").value);
-  applyMode(!!(code && findOpenPosition(code)));
+  applyMode(code && findOpenPosition(code) ? "sell" : "buy");
 }
 
 // ── Task 15: amend 모드 ──────────────────────────────────────────────────
 
+// hidden 인 컨트롤에 required 가 걸려 있으면 constraint validation 이
+// 포커스할 수 없는 요소에서 막혀 submit 이벤트 자체가 안 나간다(리뷰
+// C1, 실측 — 매입/매도/열린 기록 amend 전부 이렇게 죽어 있었다). 그래서
+// index.html 은 이 두 입력에 정적 required 를 안 두고, 이 함수가 보일 때만
+// required 를 켠다 — hidden 토글과 required 토글을 한 곳에서 같이 관리해
+// 서로 어긋날 수 없게 한다.
 function setExitFieldsVisible(v) {
   document.getElementById("exit-price-field").hidden = !v;
   document.getElementById("exit-date-field").hidden = !v;
   document.getElementById("exit-reason-field").hidden = !v;
+  document.getElementById("exit-price").required = v;
+  document.getElementById("exit-date").required = v;
 }
 
 // #source 는 고정 5개 옵션 select 다(매입 모드는 항상 이 중 하나만 쓴다).
@@ -779,28 +823,6 @@ function clearExtraSourceOptions() {
     .forEach(o => o.remove());
 }
 
-// amend 모드 진입 — applyMode(항목 7, buy/sell 전환)와 같은 요소들을 건드리되
-// 세 번째 상태로 확장한다(index.html 계약 참조). hasExit 이 false 면
-// exit-* 필드는 계속 숨겨둔다 — 대상 기록에 exits 가 없으면(status 가
-// 뭐라 되어 있든) apply_amend 가 exit 패치를 거부하므로, 폼에서부터
-// 낼 수 없는 값을 받지 않는다.
-function applyModeAmend(hasExit) {
-  const modeEl = document.getElementById("mode");
-  const label = document.getElementById("price-label");
-  const srcField = document.getElementById("source-field");
-  const form = document.getElementById("form");
-  const btn = document.getElementById("submit-btn");
-  modeEl.hidden = false;
-  modeEl.textContent = "고치기 — 기존 기록을 고치는 중입니다";
-  label.textContent = "매입가";
-  srcField.hidden = false;
-  form.dataset.mode = "amend";
-  btn.textContent = "고치기 반영";
-  document.getElementById("cancel-btn").hidden = false;
-  document.getElementById("signal-date-field").hidden = false;
-  setExitFieldsVisible(hasExit);
-}
-
 // "고치기" 버튼(renderTable/nameCell 이 만든다)의 위임 클릭 핸들러 — 표는
 // 매 렌더마다 tbody 를 통째로 비우므로(renderTable), 리스너는 살아있는
 // 상위 <table> 에 한 번만 건다.
@@ -822,6 +844,13 @@ function onAmendButtonClick(e) {
 // 필드를 결과적으로 안전하게 건드리지 않는다. 신원 확인(was/was_price)은
 // 여기서 하지 않는다 — 제출 직전 재조회(onAmendSubmit)가 그 몫이다.
 function startAmend(id) {
+  // 이미 다른 기록을 amend 중이면(다른 행의 "고치기"를 눌렀다) 지금까지
+  // 입력한 내용은 서버에 전혀 안 남아 있다 — 조용히 버리면 사용자가
+  // 모르고 잃을 수 있으니 한 번 확인한다. 같은 기록을 다시 누른 경우는
+  // (id 가 같으면) 그냥 STATE 기준으로 다시 채운다 — 되물을 이유가 없다.
+  if (amendTarget && amendTarget.id !== id) {
+    if (!confirm("다른 기록을 고치는 중입니다. 지금 입력한 내용을 버리고 이 기록을 고칠까요?")) return;
+  }
   const p = STATE.positions.find(x => x.id === id);
   if (!p || !isReadablePosition(p)) {
     alert("이 기록은 형식이 올바르지 않아 고칠 수 없습니다.");
@@ -874,7 +903,7 @@ function startAmend(id) {
     document.getElementById("exit-reason").value = "";
   }
 
-  applyModeAmend(!!exitBaseline);
+  applyMode("amend", { hasExit: !!exitBaseline });
 
   // adjustments 가 있는 기록은 표에 매입가/현재가/수익률이 전부 "-"로
   // 보인다(항목 17 — 조정 방향을 판단할 근거가 없어 계산 자체를 건너뛴다).
@@ -893,9 +922,12 @@ function startAmend(id) {
   document.getElementById("form").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-// amend 를 명시적으로 나간다(#cancel-btn, index.html 계약) — 매입/매도는
-// #q 로 암묵 전환되지만 amend 는 그렇지 않다(항목: "화면 - 지켜야 할 것").
-// 전부 매입 모드 기본값으로 되돌린다.
+// amend 를 명시적으로 나간다(#cancel-btn, index.html 계약; onAmendSubmit
+// 성공 후에도 부른다 — 아래 참조) — 매입/매도는 #q 로 암묵 전환되지만
+// amend 는 그렇지 않다(항목: "화면 - 지켜야 할 것"). applyMode("buy") 가
+// #cancel-btn/#signal-date-field/exit-* 를 포함해 여덟 요소를 전부
+// 매입 모드로 되돌리므로 여기서 따로 되돌리지 않는다(리뷰 C2 — 모드별
+// 요소를 두 곳에서 나눠 관리하던 게 문제의 근원이었다).
 function exitAmendMode() {
   amendTarget = null;
   clearExtraSourceOptions();
@@ -908,10 +940,7 @@ function exitAmendMode() {
   document.getElementById("exit-price").value = "";
   document.getElementById("exit-date").value = "";
   document.getElementById("exit-reason").value = "";
-  document.getElementById("signal-date-field").hidden = true;
-  document.getElementById("cancel-btn").hidden = true;
-  setExitFieldsVisible(false);
-  applyMode(false);
+  applyMode("buy");
   fillCandidates("");
 }
 
@@ -1007,40 +1036,76 @@ async function onAmendSubmit(ev) {
   // 본다. 이 사전 오픈 자체가 막히면(pending=null) 아래에서 예전처럼
   // 제출 시점에 한 번 더 시도하고, 그마저 막히면 현재 탭에서 이동한다.
   const pending = window.open("", "_blank");
+  let redirected = false;   // pending 을 실제 URL로 돌렸는지 — finally 에서 닫을지 판단
 
-  const fresh = await load("positions.json", { positions: [] }, { allow404: true });
-  if (!fresh.ok) {
-    if (pending) pending.close();
-    alert("최신 기록을 다시 불러오지 못했습니다 — 네트워크를 확인하고 다시 시도해주세요.");
-    return;
-  }
-  const freshMatch = (fresh.data.positions || []).find(p => p.id === target.id);
-  if (!freshMatch || !isReadablePosition(freshMatch)) {
-    // 점 4 — 재조회한 파일에 더 이상 이 기록이 없다(다른 기기에서 이미
-    // 고쳤거나, id 가 바뀌었거나). 낡은 was/was_price 로 이슈를 열면
-    // 엉뚱한 기록을 겨눌 수 있으니 여기서 멈춘다 — 새로고침을 안내한다.
-    if (pending) pending.close();
-    alert("이 기록을 더 이상 찾을 수 없습니다 — 다른 곳에서 이미 고쳐졌거나 삭제된 것 같습니다. "
-      + "새로고침 후 다시 확인해주세요.");
-    return;
-  }
-  patch.was = freshMatch.code;
-  patch.was_price = freshMatch.buys[0].price;
+  try {
+    // allow404 를 안 쓴다(리뷰 I4) — main() 의 최초 로드와 달리 여기서는
+    // 이 기록이 방금 전까지 있었다는 걸 이미 안다. allow404 를 쓰면
+    // positions.json 자체가 404(브랜치·경로가 깨졌다 등)여도 fallback
+    // 인 {positions:[]} 이 "정상 응답, 그냥 빈 목록"으로 둔갑해 아래
+    // find 가 실패하고, 사용자는 "다른 곳에서 이미 고쳐졌거나 삭제된 것
+    // 같습니다"라는 엉뚱한 안내를 받는다 — 실제로는 파일을 통째로
+    // 못 받아온 것이다. allow404 없이 두면 404 는 load() 안에서 그냥
+    // HTTP 오류로 처리되어 아래 !fresh.ok 분기(네트워크 문제 안내)로
+    // 정확히 떨어진다.
+    const fresh = await load("positions.json", { positions: [] });
+    if (!fresh.ok) {
+      alert("최신 기록을 다시 불러오지 못했습니다 — 네트워크를 확인하고 다시 시도해주세요.");
+      return;
+    }
+    // 리뷰 I3 — positions 가 배열이 아닌 손상 파일({"positions":"..."}
+    // 등)이면 아래 .find 가 TypeError 로 죽는다. amend 가 고치려는 바로
+    // 그 손상 유형이므로 조용히 스크립트 오류로 남기지 않고 사람이 읽을
+    // 메시지를 낸다 — 그리고 이 함수를 통째로 try 로 감싸서(아래) 여기서
+    // 던지든 다른 데서 던지든 catch 가 pending 탭을 정리한다.
+    const list = Array.isArray(fresh.data.positions) ? fresh.data.positions : null;
+    if (!list) {
+      alert("positions.json 형식이 예상과 다릅니다 — 자동으로 고칠 수 없습니다. "
+        + "새로고침 후 다시 확인해주세요.");
+      return;
+    }
+    const freshMatch = list.find(p => p.id === target.id);
+    if (!freshMatch || !isReadablePosition(freshMatch)) {
+      // 점 4 — 재조회한 파일에 더 이상 이 기록이 없다(다른 기기에서 이미
+      // 고쳤거나, id 가 바뀌었거나). 낡은 was/was_price 로 이슈를 열면
+      // 엉뚱한 기록을 겨눌 수 있으니 여기서 멈춘다 — 새로고침을 안내한다.
+      alert("이 기록을 더 이상 찾을 수 없습니다 — 다른 곳에서 이미 고쳐졌거나 삭제된 것 같습니다. "
+        + "새로고침 후 다시 확인해주세요.");
+      return;
+    }
+    patch.was = freshMatch.code;
+    patch.was_price = freshMatch.buys[0].price;
 
-  const displayName = patch.name || freshMatch.name || freshMatch.code;
-  const url = issueUrl("AMEND " + displayName, patch);
-  if (pending) {
-    pending.location.href = url;
-  } else {
-    const win = window.open(url, "_blank", "noopener");
-    if (!win) location.href = url;
-  }
+    const displayName = patch.name || freshMatch.name || freshMatch.code;
+    const url = issueUrl("AMEND " + displayName, patch);
+    if (pending) {
+      pending.location.href = url;
+    } else {
+      const win = window.open(url, "_blank", "noopener");
+      if (!win) location.href = url;
+    }
+    redirected = true;
 
-  // 점 7 — 사용자는 이슈만 새 탭에서 열었을 뿐 표는 아직 이전 값이다.
-  // 워크플로가 반영할 때까지 몇 분 걸릴 수 있는데 화면이 아무 말도 안
-  // 하면 "눌렀는데 왜 안 바뀌지"로 이어진다. 정직하게 남긴다.
-  addStaleMessage("방금 고치기 이슈를 새 탭에서 열었습니다 — 깃허브에서 제출을 완료하면 반영에 몇 분 "
-    + "걸릴 수 있습니다. 이 표는 아직 이전 값을 보여주고 있으니, 나중에 새로고침해서 확인해주세요.");
+    // 점 7 — 사용자는 이슈만 새 탭에서 열었을 뿐 표는 아직 이전 값이다.
+    // 워크플로가 반영할 때까지 몇 분 걸릴 수 있는데 화면이 아무 말도 안
+    // 하면 "눌렀는데 왜 안 바뀌지"로 이어진다. 정직하게 남긴다.
+    addStaleMessage("방금 고치기 이슈를 새 탭에서 열었습니다 — 깃허브에서 제출을 완료하면 반영에 몇 분 "
+      + "걸릴 수 있습니다. 이 표는 아직 이전 값을 보여주고 있으니, 나중에 새로고침해서 확인해주세요.");
+
+    // 리뷰 부가 개선 1 — 성공 후에도 amend 모드가 그대로 남아 있으면, 폼도
+    // 그대로 남은 채 사용자가 실수로 다시 제출을 누르면 똑같은 이슈가
+    // 한 번 더 열린다(apply_amend 가 두 번째는 AlreadyApplied(rc=4)로
+    // 막긴 하지만, 열릴 필요 없는 이슈고 안내 배지도 중복으로 쌓인다).
+    // amend 는 끝났으니 명시적으로 나간다.
+    exitAmendMode();
+  } catch (e) {
+    // 리뷰 I3 — 위 어디서 던지든(예상 못 한 형태의 JSON 등) 여기로 모여
+    // pending 탭을 정리하고 사람이 읽을 오류를 알린다. reportFatal 은
+    // 이미 있는 오류 경계(#stale 배지)를 그대로 재사용한다.
+    reportFatal(e);
+  } finally {
+    if (pending && !redirected) pending.close();
+  }
 }
 
 function issueUrl(title, payload) {
@@ -1176,6 +1241,16 @@ document.getElementById("closed").addEventListener("click", onAmendButtonClick);
   }
   // 표가 그려지는 동안 사용자가 이미 입력을 시작했을 수 있으니, 마스터가
   // 늦게 도착하면 지금 값 기준으로 자동완성·모드를 한 번 더 채운다.
+  //
+  // 리뷰 C2 — 이 await(master.json, 207KB) 동안 표는 이미 그려져 있고
+  // "고치기" 버튼도 눌릴 수 있다. 여기서 amendTarget 가드 없이
+  // updateMode() 를 부르면, 마침 amend 중인 기록이 "보유 중" 종목이라서
+  // (amend 로 여는 기록은 정의상 그럴 때가 흔하다) findOpenPosition 이
+  // 걸려 매도 모드로 화면이 덮어써진다 — amendTarget 은 그대로라 실제
+  // 제출은 여전히 amend patch 로 나가는데, 화면은 "매도가" 라벨을
+  // 보여줘서 사용자가 매도가로 입력한 값이 매입가로 들어간다(실측). 이제
+  // updateMode() 자신도 이 가드를 갖고 있지만(벨트+서스펜더), 호출부에도
+  // 남겨 이 조건이 한눈에 보이게 한다.
   fillCandidates(document.getElementById("q").value);
-  updateMode();
+  if (!amendTarget) updateMode();
 })().catch(reportFatal);   // 항목 13, F1 — 위 개별 try 가 못 잡는 나머지 전부

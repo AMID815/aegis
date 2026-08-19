@@ -108,11 +108,20 @@
     </div>
     <div class="field" id="exit-price-field" hidden>
       <label for="exit-price">매도가</label>
-      <input id="exit-price" type="text" inputmode="numeric" placeholder="매도가" required>
+      <!--
+        required 를 여기 정적으로 두지 않는다 — hidden(=display:none) 인
+        컨트롤에 required 가 걸려 있으면 constraint validation 이 그 필드에서
+        막혀 버리는데, 포커스를 받을 수 없는 요소라 브라우저가 아예 submit
+        이벤트를 내보내지 않는다(콘솔에만 "not focusable" 오류가 남는다).
+        매입/매도/열린 기록 amend 등 이 필드가 숨어 있는 모든 경로가
+        전부 이 방식으로 막혔었다(리뷰 C1, 실측). app.js 의
+        setExitFieldsVisible() 가 hidden 을 켤 때 required 도 같이 켠다.
+      -->
+      <input id="exit-price" type="text" inputmode="numeric" placeholder="매도가">
     </div>
     <div class="field" id="exit-date-field" hidden>
       <label for="exit-date">매도일</label>
-      <input id="exit-date" type="date" required>
+      <input id="exit-date" type="date">
     </div>
     <div class="field" id="exit-reason-field" hidden>
       <label for="exit-reason">매도 사유(선택)</label>

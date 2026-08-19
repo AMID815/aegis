@@ -1,0 +1,32 @@
+:root { --bg:#fff; --fg:#222; --line:#ddd; --up:#c0392b; --down:#2471a3; --dim:#888; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#16181c; --fg:#e6e6e6; --line:#333; --up:#e74c3c; --down:#5dade2; --dim:#999; }
+}
+body { background:var(--bg); color:var(--fg); font-family:system-ui,"Malgun Gothic",sans-serif;
+       margin:0; padding:16px; max-width:900px; margin-inline:auto; }
+h1 { font-size:1.3rem; margin:0 0 4px; }
+h2 { font-size:1rem; margin:24px 0 8px; }
+.asof { color:var(--dim); font-size:.85rem; }
+.stale { background:var(--up); color:#fff; padding:6px 10px; border-radius:4px;
+         font-size:.85rem; margin-bottom:6px; }
+.mode { background:var(--down); color:#fff; padding:6px 10px; border-radius:4px;
+        font-size:.85rem; margin:4px 0; flex-basis:100%; }
+.table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+table { width:100%; border-collapse:collapse; font-size:.9rem; }
+th, td { border-bottom:1px solid var(--line); padding:6px 4px; text-align:right; white-space:nowrap; }
+th:first-child, td:first-child { text-align:left; }
+.up { color:var(--up); } .down { color:var(--down); }
+#summary { display:flex; flex-wrap:wrap; gap:12px; margin-top:12px; }
+#summary div { border:1px solid var(--line); border-radius:6px; padding:8px 12px; }
+form { display:flex; flex-wrap:wrap; gap:8px; align-items:flex-end; }
+.field { display:flex; flex-direction:column; gap:2px; }
+.field label { font-size:.75rem; color:var(--dim); }
+/* .field/.mode 는 display:flex 를 강제하므로 등급이 같은 UA 기본 규칙
+   [hidden]{display:none} 을 이겨버린다 — app.js 가 매도 모드에서
+   #source-field.hidden 을 켜도 안 숨는다. 명시적으로 되돌린다. */
+[hidden] { display:none !important; }
+input, select, button { padding:8px; font-size:1rem; background:var(--bg);
+                        color:var(--fg); border:1px solid var(--line); border-radius:4px; }
+button { cursor:pointer; }
+.hint { color:var(--dim); font-size:.85rem; }
+@media (max-width:600px) { .field, input, select, button { width:100%; } }

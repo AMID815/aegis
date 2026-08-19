@@ -70,3 +70,150 @@ def test_손상된_파일은_빈_상태로_격리한다():
     assert models.normalize(None) == models.empty_state()
     assert models.normalize({"positions": "목록아님"}) == models.empty_state()
     assert models.normalize({"schema": 1, "positions": [{"없는키": 1}]})["positions"] == []
+
+
+# ── 아래는 코드 리뷰에서 지적된 결함(F1~F12)을 고정하는 테스트다 ──────────────
+
+
+def test_같은_종목_여러_보유_중_가장_오래된_것이_매도된다():
+    # 오래된 매수(08-19)를 나중에 추가해서, min() 이 리스트 순서가 아니라
+    # 날짜 값으로 고르는지 확인한다. 순서로 골랐다면 이 테스트는 실패해야 한다.
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 250000, "date": "2026-08-20"})
+    d = models.apply_buy(d, {
+        "code": "005930", "name": "삼성전자", "price": 240000, "date": "2026-08-19"})
+    assert [p["buys"][0]["date"] for p in d["positions"]] == ["2026-08-20", "2026-08-19"]
+
+    out = models.apply_sell(d, {
+        "code": "005930", "price": 260000, "date": "2026-08-25"})
+    closed = [p for p in out["positions"] if p["status"] == "closed"]
+    still_open = [p for p in out["positions"] if p["status"] == "open"]
+    assert len(closed) == 1 and closed[0]["buys"][0]["date"] == "2026-08-19"
+    assert len(still_open) == 1 and still_open[0]["buys"][0]["date"] == "2026-08-20"
+
+
+def test_가격이_불리언이면_거부한다():
+    with pytest.raises(models.RejectedError):
+        models._price(True)
+
+
+def test_가격_0_4는_0으로_저장되지_않고_거부된다():
+    with pytest.raises(models.RejectedError):
+        models._price(0.4)
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+def test_가격이_무한_또는_NaN이면_거부한다(bad):
+    with pytest.raises(models.RejectedError):
+        models._price(bad)
+
+
+def test_id가_없는_보유도_정규화되고_이어지는_매수에서_KeyError가_나지_않는다():
+    raw = {"schema": 1, "positions": [
+        {"code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-08-01", "price": 200000}]},
+    ]}
+    d = models.normalize(raw)
+    assert d["positions"][0]["id"] == "20260801-005930"
+    out = models.apply_buy(d, {
+        "code": "000660", "name": "SK하이닉스", "price": 150000, "date": "2026-08-19"})
+    assert len(out["positions"]) == 2
+
+
+def test_buys의_첫_항목이_이상하면_격리되고_매도해도_TypeError가_아니다():
+    raw = {"schema": 1, "positions": [
+        {"code": "005930", "name": "삼성전자", "buys": ["문자열"], "status": "open"},
+    ]}
+    d = models.normalize(raw)
+    assert d["positions"] == []
+    with pytest.raises(models.RejectedError):
+        models.apply_sell(d, {"code": "005930", "price": 100, "date": "2026-08-19"})
+
+
+def test_normalize는_입력을_변형하지_않는다():
+    raw = {"schema": 1, "positions": [
+        {"code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-08-19", "price": 100000}]},
+    ]}
+    pos_ref = raw["positions"][0]
+    before = dict(pos_ref)
+    out = models.normalize(raw)
+    assert pos_ref == before                    # 원본 내용이 그대로 남아있다
+    assert out["positions"][0] is not pos_ref    # 반환된 것은 별개 객체다
+
+
+def test_dropped_인자로_버려진_항목을_돌려받는다():
+    raw = {"schema": 1, "positions": [
+        {"code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-08-19", "price": 100000}]},
+        {"없는키": 1},
+        {"code": "005930", "buys": ["문자열"]},
+    ]}
+    dropped = []
+    out = models.normalize(raw, dropped)
+    assert len(out["positions"]) == 1
+    assert len(dropped) == 2
+
+
+def test_알수없는_schema는_거부한다():
+    with pytest.raises(models.RejectedError):
+        models.normalize({"schema": 2, "positions": []})
+
+
+def test_status가_open_closed가_아니면_격리한다():
+    raw = {"schema": 1, "positions": [
+        {"code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-08-19", "price": 100000}], "status": "halted"},
+    ]}
+    assert models.normalize(raw)["positions"] == []
+
+
+def test_매도일이_매수일보다_이르면_거부한다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    with pytest.raises(models.RejectedError):
+        models.apply_sell(d, {
+            "code": "005930", "price": 260000, "date": "2026-08-18"})
+
+
+@pytest.mark.parametrize("bad_name", [12345, ["가", "나"]])
+def test_이름이_문자열이_아니면_거부한다(bad_name):
+    with pytest.raises(models.RejectedError):
+        models.apply_buy(models.empty_state(), {
+            "code": "005930", "name": bad_name, "price": 247500, "date": "2026-08-19"})
+
+
+def test_출처가_20자를_넘으면_잘라내지_않고_거부한다():
+    with pytest.raises(models.RejectedError):
+        models.apply_buy(models.empty_state(), {
+            "code": "005930", "name": "삼성전자", "price": 247500,
+            "date": "2026-08-19", "source": "가" * 21})
+
+
+def test_정상적인_상태는_정규화해도_내용이_그대로다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500,
+        "date": "2026-08-19", "source": "종가베팅",
+        "signal_date": "2026-08-18", "memo": "메모",
+    })
+    assert models.normalize(d) == d
+
+
+def test_시그널일_형식이_틀리면_거부한다():
+    with pytest.raises(models.RejectedError):
+        models.apply_buy(models.empty_state(), {
+            "code": "005930", "name": "삼성전자", "price": 247500,
+            "date": "2026-08-19", "signal_date": "2026/08/18"})
+
+
+def test_시그널일이_매수일보다_늦으면_거부한다():
+    with pytest.raises(models.RejectedError):
+        models.apply_buy(models.empty_state(), {
+            "code": "005930", "name": "삼성전자", "price": 247500,
+            "date": "2026-08-19", "signal_date": "2026-08-20"})
+
+
+def test_존재하지_않는_날짜는_거부한다():
+    with pytest.raises(models.RejectedError):
+        models.apply_buy(models.empty_state(), {
+            "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-02-30"})

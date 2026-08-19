@@ -29,6 +29,15 @@ strict 디코드하면 첫 바이트에서 바로 UnicodeDecodeError). 이건 �
 호출자(아래 missing_codes 등)가 "요청했는데 없다"로 잡아낸다. 상폐·
 거래정지로 응답 자체에서 통째로 빠지는 종목과 똑같은 방식으로 드러난다.
 
+⚠ 단, 이건 배치 안에 살아남는 행이 하나라도 있을 때 얘기다. 한 배치의
+모든 코드가 상폐·거래정지(closePrice="-")면 parse_polling 은 0건으로 보고
+EmptyParseError 를 낸다 — missing_codes 로 조용히 드러나는 게 아니라 그
+자리에서 예외가 난다. 보유 종목이 몇 개 안 되는 개인용 트래커에서는(1~2
+종목이 전부 정지) 이 경우가 "60개 중 한둘만 빠지는" 경우보다 오히려
+현실적일 수 있다. 그래도 결과는 괜찮다 — 호출자(quotes.main)가 이 예외를
+잡아 커밋하지 않고 직전 값을 유지하므로, 정지된 종목 하나가 스냅샷 전체를
+막는 눈에 보이는 실패로 이어질 뿐 잘못된 값이 커밋되지는 않는다.
+
 이 "누락은 호출자가 대조해서 잡는다" 전제는 **polling 에만 성립한다** —
 fetch_quotes 는 요청한 코드 목록(asked)이 있어서 missing_codes 로 대조가
 된다. parse_market_sum/parse_etf 는 그런 대조 대상이 없다 — 목록 자체가
@@ -44,7 +53,7 @@ import json
 import math
 import re
 
-UA = {"User-Agent": "Mozilla/5.0"}   # Task 4 의 _fetch 가 요청 헤더로 쓴다
+UA = {"User-Agent": "Mozilla/5.0"}   # 아래 `_fetch` 가 요청 헤더로 쓴다
 
 POLL_URL = "https://polling.finance.naver.com/api/realtime/domestic/stock/{codes}"
 FCHART_URL = ("https://fchart.stock.naver.com/sise.nhn"
@@ -100,7 +109,7 @@ def _corrupted(names) -> bool:
 
     "0행이면 실패"만으로는 이 사고를 못 잡는다 — 마크업(ASCII)은 멀쩡히
     살아남고 한글만 깨지므로 행 수가 그대로다. strict 디코드가 진짜 방어선
-    (Task 4 의 _fetch)이고, 이건 그게 어딘가에서 빠졌을 때의 마지막 그물이다.
+    (아래 `_fetch`)이고, 이건 그게 어딘가에서 빠졌을 때의 마지막 그물이다.
     """
     return any(_REPLACEMENT in n for n in names)
 
@@ -266,8 +275,9 @@ import urllib.request
 # 진짜 요청을 보냄): 상한은 "개수"가 아니라 URL 길이다. 서버는 모르는 코드를
 # 그냥 조용히 빼고 200 을 준다(코드가 4,299건 상장 종목 범위를 넘어가는
 # n=140 이상에서도 매번 정상 응답, datas 개수만 실제 상장분만큼 늘어남).
-# n=1000(코드 6자리 기준 url_len≈7,061)까지 정상, n=1001(url_len≈7,068)부터
-# HTTPError 414 Request-URI Too Large — 경계를 이분탐색으로 좁혀 확인했다.
+# n=1000(코드 6자리 기준 url_len≈7,061)까지 정상, n=1001(≈7,068자)부터
+# 400 Bad Request, n=1165(≈8,216자)부터 414 Request-URI Too Large — 두
+# 단계로 막힌다(양쪽 경계 모두 이분탐색으로 좁혀 확인, 재측정으로 재확인함).
 # CHUNK=60(url_len≈481)은 이 상한의 약 1/16 이라 크게 여유롭다. 실제 보유
 # 종목 수(수십 단위)를 감안하면 더 키울 실익이 적어 그대로 둔다 — 원래
 # 주석의 "대조군이 80을 쓴다"는 남의 프로젝트 값을 근거 삼은 추측이었고,
@@ -277,8 +287,15 @@ CHUNK = 60
 EUCKR = "cp949"     # euc_kr 은 한글 79%를 못 읽는다 (설계 §10-3)
 
 
-def _fetch(url: str, enc: str = "utf-8") -> str:
-    """**strict 디코드만 쓴다.** `errors="replace"` 를 쓰면 EUC-KR 본문을 UTF-8 로
+def _fetch(url: str, enc: str) -> str:
+    """`enc` 는 필수다(기본값 없음). 이 함수는 4가지 URL 을 다루는데 그중
+    3개(FCHART/SUM/ETF)가 CP949 이고 UTF-8 은 POLL_URL 하나뿐이다 — 기본값을
+    두면 "3/4 확률로 틀린 기본값"이 되어, 나중에 (예: master.py, Task 9) 이
+    함수를 처음 쓰는 사람이 인코딩을 깜빡해도 조용히 넘어간다. strict 디코드
+    덕에 그런 실수는 첫 실행에서 바로 UnicodeDecodeError 로 터지긴 하지만
+    (아래), 애초에 그 함정을 없애는 쪽이 공짜로 더 안전하다.
+
+    **strict 디코드만 쓴다.** `errors="replace"` 를 쓰면 EUC-KR 본문을 UTF-8 로
     읽어도 예외 없이 지나가고(ASCII 마크업은 멀쩡하므로) 한글만 깨진 채 커밋된다.
     실측 2026-08-19: replace 는 50행 중 42행 이름이 깨진 채 '성공', strict 는
     UnicodeDecodeError. 인코딩 함정의 유일한 방어선이다.
@@ -305,7 +322,7 @@ def fetch_quotes(codes: list) -> dict:
     out = {}
     for i in range(0, len(codes), CHUNK):
         part = codes[i:i + CHUNK]
-        out.update(parse_polling(_fetch(POLL_URL.format(codes=",".join(part)))))
+        out.update(parse_polling(_fetch(POLL_URL.format(codes=",".join(part)), "utf-8")))
     return out
 
 

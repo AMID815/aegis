@@ -16,15 +16,18 @@ from scripts import naver
 def test_코드를_묶어서_부른다(monkeypatch):
     """polling 은 콤마 배치가 된다. 60개씩 나눈다.
 
-    2026-08-19 실측: 진짜 상한은 개수가 아니라 URL 길이다 — n=1000(코드
-    6자리 기준 url_len≈7061)까지 정상 응답, n=1001(url_len≈7068)부터
-    HTTPError 414. CHUNK=60(url_len≈481)은 그 상한의 1/16 수준이라
-    이 값을 올릴 실익이 없다(실 보유 종목 수는 수십 단위) — 그래서 그대로 둔다.
+    2026-08-19 실측(재측정으로 재확인): 진짜 상한은 개수가 아니라 URL 길이다
+    — n=1000(코드 6자리 기준 url_len≈7,061)까지 정상 응답, n=1001(≈7,068자)
+    부터 400 Bad Request, n=1165(≈8,216자)부터 414 Request-URI Too Large —
+    두 단계로 막힌다. CHUNK=60(url_len≈481)은 그 상한의 1/16 수준이라 이 값을
+    올릴 실익이 없다(실 보유 종목 수는 수십 단위) — 그래서 그대로 둔다.
     """
     불린주소 = []
+    불린인코딩 = []
 
     def 가짜(url, enc="utf-8"):
         불린주소.append(url)
+        불린인코딩.append(enc)
         codes = url.rsplit("/", 1)[-1].split(",")
         rows = ",".join(
             '{"itemCode":"%s","stockName":"n","closePrice":"1","tradableStatus":"tradable"}' % c
@@ -36,6 +39,7 @@ def test_코드를_묶어서_부른다(monkeypatch):
     q = naver.fetch_quotes(codes)
     assert len(q) == 140
     assert len(불린주소) == 3           # 60 + 60 + 20
+    assert 불린인코딩 == ["utf-8", "utf-8", "utf-8"]   # polling 은 UTF-8(EUCKR 아님)
 
 
 def test_종목이_없으면_부르지_않는다(monkeypatch):
@@ -157,10 +161,17 @@ def test_strict_디코드만_쓴다_replace는_금지(monkeypatch):
     """이 모듈 전체의 핵심 방어선. EUC-KR/CP949 바이트를 utf-8 로 strict
     디코드하면 예외가 나야 하고(방어선이 작동), cp949 로 디코드하면 정상
     복원돼야 한다. `errors="replace"` 를 쓰면 이 테스트가 잡아낸다 —
-    strict 디코드는 예외를 내지만 replace 는 조용히 성공해 버리므로."""
-    raw = "삼성전자".encode("cp949")
+    strict 디코드는 예외를 내지만 replace 는 조용히 성공해 버리므로.
 
-    def 가짜_urlopen(req, timeout=20):
+    "갂성전자" 를 쓴다("삼성전자" 가 아니라) — 설계 §10-3 이 요구하는 건
+    "cp949 를 쓴다"이지 "euc_kr 이라도 상관없다"가 아니다. 그런데 상장 종목
+    이름은 전부 KS X 1001(euc_kr 이 읽는 부분집합) 안에 있어서, "삼성전자"
+    로는 EUCKR 을 "euc_kr" 로 바꿔도 이 테스트가 못 잡는다. "갂"은 KS X 1001
+    밖의 음절이라 cp949 는 읽고 euc_kr 은 못 읽는다 — 이 한 글자가
+    cp949/euc_kr 을 실제로 갈라놓는다(2026-08-19 실측 재확인)."""
+    raw = "갂성전자".encode("cp949")
+
+    def 가짜_urlopen(req, timeout=None):
         return _가짜응답(raw)
 
     monkeypatch.setattr(naver.urllib.request, "urlopen", 가짜_urlopen)
@@ -168,19 +179,25 @@ def test_strict_디코드만_쓴다_replace는_금지(monkeypatch):
     with pytest.raises(UnicodeDecodeError):
         naver._fetch("http://x", "utf-8")
 
-    assert naver._fetch("http://x", naver.EUCKR) == "삼성전자"
+    assert naver._fetch("http://x", naver.EUCKR) == "갂성전자"
 
 
-def test_UA_헤더를_요청에_담아_보낸다(monkeypatch):
+def test_UA_헤더와_20초_타임아웃을_요청에_담아_보낸다(monkeypatch):
+    """가짜 urlopen 의 `timeout` 기본값을 20 으로 두면(_fetch 가 실제로 넘기는
+    값과 같은 값) _fetch 가 timeout 을 아예 안 넘겨도 이 스텁이 대신 20 을
+    채워 넣어 테스트가 통과해 버린다 — 검증이 헛것이 된다. 기본값을 None
+    으로 둬서, _fetch 가 timeout 인자를 빠뜨리면 실제로 그렇게 드러나게 한다.
+    (하드코딩된 20초 없이는 재시도-없음 결정의 절반이 근거를 잃는다 — 무한정
+    걸리는 요청이 Actions 잡을 통째로 물고 늘어질 수 있다.)"""
     captured = {}
 
-    def 가짜_urlopen(req, timeout=20):
+    def 가짜_urlopen(req, timeout=None):
         captured["req"] = req
         captured["timeout"] = timeout
         return _가짜응답(b"ok")
 
     monkeypatch.setattr(naver.urllib.request, "urlopen", 가짜_urlopen)
-    naver._fetch("http://x")
+    naver._fetch("http://x", "utf-8")
     assert captured["req"].get_header("User-agent") == naver.UA["User-Agent"]
     assert captured["timeout"] == 20
 
@@ -189,9 +206,9 @@ def test_HTTP_에러는_삼키지_않고_그대로_전파한다(monkeypatch):
     """_fetch 는 판단하지 않는다 — 404/500 은 호출자(quotes.py 등)가 잡아서
     "이번엔 커밋하지 않는다"로 처리한다(그 판단은 이 파일의 책임이 아니다)."""
 
-    def 가짜_urlopen(req, timeout=20):
+    def 가짜_urlopen(req, timeout=None):
         raise urllib.error.HTTPError(req.full_url, 404, "Not Found", None, None)
 
     monkeypatch.setattr(naver.urllib.request, "urlopen", 가짜_urlopen)
     with pytest.raises(urllib.error.HTTPError):
-        naver._fetch("http://x")
+        naver._fetch("http://x", "utf-8")

@@ -272,3 +272,28 @@ def test_저장된_가격이_소수면_격리한다():
          "buys": [{"date": "2026-08-19", "price": 100.4}]},
     ]}
     assert models.normalize(raw)["positions"] == []
+
+
+# ── 최종 검토에서 지적된 결함: 큰 정수에서 isfinite 가 OverflowError ──────
+
+
+def test_아주_큰_정수_가격도_OverflowError_없이_받아들인다():
+    # int 는 항상 유한하므로 math.isfinite() 자체를 태우면 안 된다(10**309 부근에서 죽음).
+    huge = int("9" * 400)
+    assert models._price(huge) == huge
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+def test_큰_정수_수정_후에도_inf_nan은_여전히_거부한다(bad):
+    with pytest.raises(models.RejectedError):
+        models._price(bad)
+
+
+@pytest.mark.parametrize("good_price", [100, 100.0])
+def test_큰_정수_수정_후에도_정수값_가격은_여전히_통과한다(good_price):
+    assert models._price(good_price) == 100
+
+
+def test_큰_정수_수정_후에도_0_4는_여전히_거부한다():
+    with pytest.raises(models.RejectedError):
+        models._price(0.4)

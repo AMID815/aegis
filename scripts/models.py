@@ -29,7 +29,7 @@ def empty_state() -> dict:
 def _price(v):
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         raise RejectedError(f"가격이 숫자가 아님: {v!r}")
-    if not math.isfinite(v):
+    if isinstance(v, float) and not math.isfinite(v):   # int 는 항상 유한하다 — float 만 검사
         raise RejectedError(f"가격이 유한하지 않음: {v!r}")
     p = round(v)          # 원 단위 정수. 절단(int)이 아니라 반올림 — 계통적 편향 방지
     if p <= 0:

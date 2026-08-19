@@ -10,7 +10,7 @@ from collections.abc import Iterable
 
 
 def is_trading_day(days: list, d: str) -> bool:
-    return d in set(days)
+    return d in days
 
 
 def held_days(days: list, start: str, end: str) -> int | None:

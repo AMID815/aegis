@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from scripts import calendar as cal
+from scripts import trading_calendar as cal
 
 DAYS = ["2026-08-12", "2026-08-13", "2026-08-14", "2026-08-18", "2026-08-19"]
 # 2026-08-15 광복절, 16~17 주말 → 달력에 없다
@@ -58,6 +58,25 @@ def test_빠진_날짜를_찾는다():
     assert cal.missing(DAYS, 3, 있음) == ["2026-08-14"]
 
 
+def test_빠진_날짜는_오래된_것부터_순서대로():
+    """전부 빠졌을 때만 순서가 드러난다 — 원소 하나짜리 결과로는 뒤집혀도 통과한다.
+
+    docstring 이 약속하는 '오래된 것부터' 를 실제로 고정한다. close.py 는
+    이 순서대로 과거 쪽부터 백필한다.
+    """
+    assert cal.missing(DAYS, 5, set()) == DAYS
+
+
 def test_달력이_짧으면_경고한다():
     assert cal.too_short(DAYS, need=30) is True
     assert cal.too_short(DAYS * 10, need=30) is False
+
+
+def test_빈_달력():
+    """빈 달력은 too_short() 가 걸러주는 게 정상 경로지만, 나머지 함수들도
+    각자 정직하게 응답해야 한다 — 예외를 던지거나 엉뚱한 값을 주지 않는다.
+    """
+    assert cal.held_days([], "2026-08-13", "2026-08-19") is None
+    assert cal.recent([], 5) == []
+    assert cal.missing([], 30, {"2026-08-19"}) == []
+    assert cal.too_short([], need=30) is True

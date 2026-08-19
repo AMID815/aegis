@@ -1,0 +1,43 @@
+name: close
+# 종가 확정·백필 + 종목 마스터 갱신.
+#
+# **시각에 의존하지 않는다.** 일봉 종가는 15:31~32 에 나온 뒤 안 바뀌므로,
+# 이 런이 17시에 돌든 다음날 아침에 돌든 결과가 같다. 깃허브 cron 이 밀리거나
+# 걸러도 다음 런이 빠진 날을 메운다. 수능일(마감 16:30)도 그냥 흡수된다.
+#
+# UTC 08:00 = KST 17:00,  UTC 23:00 = KST 익일 08:00
+
+on:
+  schedule:
+    - cron: "0 8,23 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: data-write
+  cancel-in-progress: false
+
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 종가 확정·백필
+        run: python -m scripts.close
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 마스터는 종가 확정과 독립이다. 위가 실패해도 갱신한다.
+      - name: 종목 마스터 갱신
+        if: always()
+        run: python -m scripts.master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

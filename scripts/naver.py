@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """네이버 금융. **무인증**이라 개발 PC 에서도 호출해도 된다 (키움과 다르다).
 
-이 파일은 **순수 파싱만** 담당한다(Task 3). 네트워크 호출(_fetch/fetch_*)은
-별도 커밋(Task 4)에서 얹는다 — 여기서는 문자열 → 값만 한다.
+파싱(parse_*, Task 3)과 네트워크(_fetch/fetch_*, Task 4)를 함께 담는다 —
+파싱은 문자열 → 값만 하고 판단·저장은 하지 않는다는 경계는 그대로다.
 
 인코딩 함정과 이 모듈이 실제로 막는 것 / 막지 못하는 것
 ----------------------------------------------------------
@@ -17,8 +17,8 @@ utf-8/replace 로 잘못 디코드해도 ASCII 로만 이루어진 마크업(`<a
 아무것도 안 뽑히는 경우**다 — 이건 실제로 유효하고 남겨둘 이유가 있다.
 
 **실제 방어선은 디코드를 strict 로 하는 것**이다(utf-8 로 EUC-KR 바이트를
-strict 디코드하면 첫 바이트에서 바로 UnicodeDecodeError). 이건 이 파일이 아니라
-Task 4 의 `_fetch`(네트워크 계층)가 책임진다 — 거기서 `errors="replace"` 를
+strict 디코드하면 첫 바이트에서 바로 UnicodeDecodeError). 이건 파싱 함수가
+아니라 아래 `_fetch`(네트워크 계층)가 책임진다 — 거기서 `errors="replace"` 를
 쓰면 이 파일의 어떤 방어도 소용없다. 여기서는 보조 방어선으로, 뽑아낸 이름에
 치환문자(U+FFFD)가 섞여 있으면 그것도 실패로 올린다(아래 `_corrupted`) — strict
 디코드가 어딘가에서 빠지더라도 마지막에 한 번 더 잡기 위해서다.
@@ -26,7 +26,7 @@ Task 4 의 `_fetch`(네트워크 계층)가 책임진다 — 거기서 `errors="
 한 배치(polling 최대 60종목, ETF 목록 1162건)에 섞인 개별 항목 하나가
 깨졌다고 배치 전체를 죽이지 않는다. 그 항목만 조용히 빼고 나머지를
 살린다 — 빠진 항목은 이 모듈의 결과 dict 에서 그냥 없는 것으로 나타나므로,
-호출자(Task 4 의 missing_codes 등)가 "요청했는데 없다"로 잡아낸다. 상폐·
+호출자(아래 missing_codes 등)가 "요청했는데 없다"로 잡아낸다. 상폐·
 거래정지로 응답 자체에서 통째로 빠지는 종목과 똑같은 방식으로 드러난다.
 
 이 "누락은 호출자가 대조해서 잡는다" 전제는 **polling 에만 성립한다** —
@@ -257,3 +257,85 @@ def parse_etf(body: str) -> dict:
     if len(items) < MIN_ETF_ROWS:
         raise EmptyParseError(f"ETF 목록이 너무 적다({len(items)}건 < {MIN_ETF_ROWS}) — 마크업이 바뀐 것으로 본다")
     return items
+
+
+# ── 네트워크 ────────────────────────────────────────────────
+import urllib.request
+
+# polling 콤마 배치 크기. 2026-08-19 실측(가짜 6자리 코드로 URL 을 늘려가며
+# 진짜 요청을 보냄): 상한은 "개수"가 아니라 URL 길이다. 서버는 모르는 코드를
+# 그냥 조용히 빼고 200 을 준다(코드가 4,299건 상장 종목 범위를 넘어가는
+# n=140 이상에서도 매번 정상 응답, datas 개수만 실제 상장분만큼 늘어남).
+# n=1000(코드 6자리 기준 url_len≈7,061)까지 정상, n=1001(url_len≈7,068)부터
+# HTTPError 414 Request-URI Too Large — 경계를 이분탐색으로 좁혀 확인했다.
+# CHUNK=60(url_len≈481)은 이 상한의 약 1/16 이라 크게 여유롭다. 실제 보유
+# 종목 수(수십 단위)를 감안하면 더 키울 실익이 적어 그대로 둔다 — 원래
+# 주석의 "대조군이 80을 쓴다"는 남의 프로젝트 값을 근거 삼은 추측이었고,
+# 이제는 이 파일 자체의 실측으로 대체한다.
+CHUNK = 60
+
+EUCKR = "cp949"     # euc_kr 은 한글 79%를 못 읽는다 (설계 §10-3)
+
+
+def _fetch(url: str, enc: str = "utf-8") -> str:
+    """**strict 디코드만 쓴다.** `errors="replace"` 를 쓰면 EUC-KR 본문을 UTF-8 로
+    읽어도 예외 없이 지나가고(ASCII 마크업은 멀쩡하므로) 한글만 깨진 채 커밋된다.
+    실측 2026-08-19: replace 는 50행 중 42행 이름이 깨진 채 '성공', strict 는
+    UnicodeDecodeError. 인코딩 함정의 유일한 방어선이다.
+
+    HTTP 에러(404/500 등 `HTTPError`, DNS 실패 등 `URLError`)는 여기서 잡지
+    않고 그대로 전파한다 — "이 실패로 커밋을 막을지"는 이 파일이 아니라
+    호출자(quotes.py 등)의 판단이다. `type(e).__name__: {e}` 로 찍으면
+    `HTTPError: HTTP Error 404: Not Found` 처럼 상태 코드까지는 나오므로
+    Actions 로그에서 어떤 종류의 실패인지는 알 수 있다(어떤 URL 이었는지는
+    나오지 않지만, fetch_* 호출 지점 자체가 몇 안 되므로 실용적으로는
+    충분하다고 판단했다 — 별도 래핑은 하지 않는다).
+
+    재시도는 하지 않는다. 이 스크립트는 30분마다 도는 스케줄이라 한 번
+    실패해도 다음 실행이 사실상 재시도이고(자연 치유), close.py 가 마감
+    확정 시 다시 백필한다 — 여기서 재시도 루프를 추가하면 실패를 감추는
+    복잡도만 늘고 실익은 없다.
+    """
+    req = urllib.request.Request(url, headers=UA)
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return r.read().decode(enc)          # strict — replace 금지
+
+
+def fetch_quotes(codes: list) -> dict:
+    out = {}
+    for i in range(0, len(codes), CHUNK):
+        part = codes[i:i + CHUNK]
+        out.update(parse_polling(_fetch(POLL_URL.format(codes=",".join(part)))))
+    return out
+
+
+def missing_codes(asked: list, got: dict) -> list:
+    """요청 수와 응답 수를 대조하지 않으면 사라진 종목을 아무도 모른다."""
+    return [c for c in asked if c not in got]
+
+
+def fetch_bars(symbol: str, n: int = 60) -> dict:
+    return parse_fchart(_fetch(FCHART_URL.format(symbol=symbol, n=n), EUCKR))
+
+
+def fetch_trading_days(n: int = 250) -> list:
+    """삼성전자 일봉 = KRX 정규장 거래일.
+
+    삼성전자 하나만 쓰는 이유: 거래정지 종목도 그날 봉 자체는 나온다(시가·
+    고가·저가는 0, 종가만 값 — parse_fchart docstring 실측). trading_days 는
+    날짜(parts[0])만 읽고 가격은 보지 않으므로, 삼성전자가 정지돼도 그날
+    거래일이라는 사실 자체는 여전히 봉으로 나와 문제가 없다. 완전 상장폐지처럼
+    봉 자체가 안 나오는 시나리오는 실측 대상이 없고(코스피 시총 1위, 상폐
+    위험이 사실상 없음), 설령 하루 빠져도 다음 실행(30분 주기)에서 누적
+    일봉 250개 중 그 하루만 비는 정도라 두 번째 종목을 곁들이는 비용을
+    들일 이유가 없다고 판단했다.
+    """
+    return trading_days(_fetch(FCHART_URL.format(symbol="005930", n=n), EUCKR))
+
+
+def fetch_market_sum(sosok: int, page: int) -> dict:
+    return parse_market_sum(_fetch(SUM_URL.format(sosok=sosok, page=page), EUCKR))
+
+
+def fetch_etf() -> dict:
+    return parse_etf(_fetch(ETF_URL, EUCKR))

@@ -80,6 +80,32 @@
   지수 수익률" 근거는 `quotes.json` 의 `benchmark_history`(250거래일 롤링)가
   이미 충분히 감당한다. `history/` 의 30일 백필 창은 그 250일 안에 항상
   포함되므로 중복 저장할 이유가 없다.
+
+리뷰 2라운드(실제 사용 시나리오를 구성해 검증) 반영:
+
+8. **`gh.list_dir("history")` 가 어떤 try 에도 없던 버그** — Contents API 5xx
+   는 일상적으로 벌어지는데, 여기서 죽으면 그 아래 확정 quotes.json 갱신까지
+   통째로 못 하게 된다(백필 하루 못 채운 것보다 더 나쁘다). try/except 로
+   감싸고 실패하면 `todo=[]` 로 백필만 건너뛴 채 확정 단계를 계속한다.
+9. **확정 스냅샷의 `status` 하드코딩** — `"tradable"` 로 고정돼 있어서
+   거래정지 종목(그날 일봉이 시가·고가·저가 0, 종가만 있는 모양으로 온다 —
+   naver.py 실측)도 "정상 거래"로 찍혔다. 설계 §5 가 요구하는 정확히 그
+   반대다. 이미 받아둔 봉만으로 `open==high==low==0 and close>0` 이면
+   `"halted"` 로 추정한다(`close._status_for`). `"market"` 도 모양만
+   맞춰 빈 문자열로 채운다.
+10. **종료코드를 쓰기 실패로만 좁힘** — 일봉 조회 실패·`gh.list_dir` 실패
+    같은 읽기 실패는 이 모듈의 핵심 전제(다음 실행이 메운다)대로 자연
+    치유되고, close.yml 에 `continue-on-error` 가 없어 매번 메일이 가면
+    "늘 있는 일"에 무뎌져 진짜 쓰기 실패 신호까지 무시하게 된다. 이제
+    `history/*.json`·확정 `quotes.json` 쓰기 실패만 `problems`(rc=1)로
+    센다 — 아래 여러 테스트의 `rc` 기댓값이 이 변경으로 바뀌었다(주석에
+    이유를 남겼다).
+11. **`price_basis` 필드 추가** — naver fchart 는 액면분할·무상증자가 있으면
+    과거 봉도 소급 재계산한다(실측: 2026-08 알테오젠 196170 무상증자 — 그
+    이전 종가는 틱 단위에 안 맞고 이후는 500원 단위로 딱 맞음). 그날 실시간
+    기록과 나중에 소급 채운 같은 날짜 파일이 그 비율만큼 어긋날 수 있다 —
+    코드로 막을 방법은 없어(감지 불가) `price_basis: "asof-fetch"` 로 그
+    사실만 스냅샷에 남긴다.
 """
 import datetime as _dt
 
@@ -254,12 +280,18 @@ def test_main_정상_백필_후_확정_커밋(monkeypatch, capsys):
         assert body["date"] in (ALL_DAYS[-2], ALL_DAYS[-1])
         assert "005930" in body["closes"]
         assert body["positions"] == 정상_보유["positions"]
+        assert body["price_basis"] == "asof-fetch"   # F4: 조회 시점 기준임을 스냅샷에 남긴다
 
     확정_path, 확정_body, 확정_sha, 확정_msg = 쓴것[2]
     assert 확정_path == close.QUOTES
     assert 확정_sha == "qsha"
     assert 확정_body["is_final"] is True
     assert 확정_body["quotes"]["005930"]["price"] == _삼성_bars()[ALL_DAYS[-1].replace("-", "")]["close"]
+    # 정상 거래(halted 아님)면 "tradable" 이어야 한다 — _bars_for 가 만드는
+    # 가짜 봉엔 open/high/low 가 없어(close 만 있음) _status_for 의
+    # open==high==low==0 조건이 애초에 성립하지 않는다(F2 회귀 방지).
+    assert 확정_body["quotes"]["005930"]["status"] == "tradable"
+    assert 확정_body["quotes"]["005930"]["market"] == ""
     assert 확정_body["positions_dropped"] == 0
     assert 확정_body["benchmark"]["KOSPI"] == pytest.approx(6400 + 34)
     assert 확정_body["benchmark_history"]["KOSPI"][ALL_DAYS[-1]] == pytest.approx(6400 + 34)
@@ -394,48 +426,30 @@ def test_main_달력이_짧으면_중단한다(monkeypatch, capsys):
     assert "짧다" in out
 
 
+보유_둘 = {"schema": 1, "positions": [
+    {"id": "20260801-005930", "code": "005930", "name": "삼성전자",
+     "buys": [{"date": "2026-08-01", "price": 240000}],
+     "exits": [], "adjustments": [], "status": "open",
+     "signal_date": None, "source": "수동", "memo": ""},
+    {"id": "20260801-000660", "code": "000660", "name": "SK하이닉스",
+     "buys": [{"date": "2026-08-01", "price": 200000}],
+     "exits": [], "adjustments": [], "status": "open",
+     "signal_date": None, "source": "수동", "memo": ""},
+]}
+
+
 def test_main_보유_종목_일봉이_완전히_실패하면_백필을_건너뛴다(monkeypatch, capsys):
     """거래정지로 그날 값이 없는 것과, 아예 요청이 실패하는 것은 다르다.
     후자를 그대로 두면 history/ 가 그 종목이 빠진 채로 영구히 저장된다
-    (missing_days 는 파일이 있으면 다시 안 본다). 대신 확정 quotes.json 은
-    계속 시도한다 — 그건 매번 다시 쓰이므로 자연 치유된다."""
-    def 가짜_bars(symbol, n=60):
-        if symbol == "005930":
-            raise TimeoutError("네트워크 타임아웃")
-        if symbol in _지수_bars:
-            return dict(_지수_bars[symbol])
-        raise AssertionError(symbol)
+    (missing_days 는 파일이 있으면 다시 안 본다).
 
-    쓴것 = []
-    _기본_준비(monkeypatch, write_capture=쓴것)
-    monkeypatch.setattr(close.naver, "fetch_bars", 가짜_bars)
-
-    rc = close.main()
-
-    # 백필은 전혀 안 씀. 확정 쪽은 005930 이 빠진 채(=0건) 이고 asked=["005930"]
-    # 하나뿐이라 ok_count=0 → should_commit 이 False → 그것도 안 쓴다.
-    assert 쓴것 == []
-    assert rc == 1
-    out = capsys.readouterr().out
-    assert "일봉 실패 005930" in out
-    assert "history/" not in out or "건너뛴" in out or "백필" in out
-
-
-def test_main_일부_종목만_일봉_실패해도_확정은_나머지로_커밋된다(monkeypatch, capsys):
-    """열린 종목이 둘인데 하나만 완전 실패 — 백필은 건너뛰지만(위 테스트와
-    같은 이유) 확정 quotes.json 은 성공한 나머지 하나로 커밋되고, 실패한
-    쪽은 missing/fail_count 로 투명하게 드러난다(quotes.py 와 같은 방식)."""
-    보유_둘 = {"schema": 1, "positions": [
-        {"id": "20260801-005930", "code": "005930", "name": "삼성전자",
-         "buys": [{"date": "2026-08-01", "price": 240000}],
-         "exits": [], "adjustments": [], "status": "open",
-         "signal_date": None, "source": "수동", "memo": ""},
-        {"id": "20260801-000660", "code": "000660", "name": "SK하이닉스",
-         "buys": [{"date": "2026-08-01", "price": 200000}],
-         "exits": [], "adjustments": [], "status": "open",
-         "signal_date": None, "source": "수동", "memo": ""},
-    ]}
-
+    뮤테이션으로 검증된 함정: 보유 종목이 하나뿐이고 그게 실패하면 bars 가
+    통째로 비어서, 게이트(`if fetch_failed:`)를 `if False:` 로 바꿔도
+    snapshot_for 가 매 날짜 None 을 돌려줘 결과적으로 아무것도 안 쓰인다 —
+    즉 게이트 자체가 아니라 "성공한 종목이 하나도 없다"는 우연 때문에
+    통과하는 무의미한 테스트가 된다. 성공하는 종목을 하나 같이 둬서, 게이트가
+    없었다면 그 종목 데이터만으로 history/ 가 (실패한 종목이 빠진 채) 실제로
+    쓰였을 상황을 만든다 — 그래야 게이트 자체를 검증한다."""
     def 가짜_bars(symbol, n=60):
         if symbol == "005930":
             return _삼성_bars()
@@ -451,7 +465,42 @@ def test_main_일부_종목만_일봉_실패해도_확정은_나머지로_커밋
 
     rc = close.main()
 
-    assert rc == 1   # 이번 실행에 일부 실패가 있었다는 사실은 여전히 드러난다
+    # 핵심 단언: history/ 로 시작하는 경로가 하나도 없어야 한다 — 게이트가
+    # 없었다면 005930 하나만으로 최근 2일치가 실제로 쓰였을 것이다.
+    history_경로 = [p for p, *_ in 쓴것 if p.startswith("history/")]
+    assert history_경로 == []
+    # 읽기(일봉) 실패는 이제 종료코드에 반영되지 않는다(리뷰 2라운드 10번,
+    # close.py 모듈 docstring 참조) — 확정 quotes.json 쓰기 자체는
+    # 성공했으므로(005930 으로) rc==0.
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "일봉 실패 000660" in out
+    assert "백필을 건너뛴다" in out
+
+
+def test_main_일부_종목만_일봉_실패해도_확정은_나머지로_커밋된다(monkeypatch, capsys):
+    """열린 종목이 둘인데 하나만 완전 실패 — 백필은 건너뛰지만(위 테스트와
+    같은 이유) 확정 quotes.json 은 성공한 나머지 하나로 커밋되고, 실패한
+    쪽은 missing/fail_count 로 투명하게 드러난다(quotes.py 와 같은 방식).
+    쓰기 자체는 성공했으므로 rc==0 — 일봉 조회 실패는 더 이상 종료코드에
+    반영되지 않는다(리뷰 2라운드 10번: 읽기 실패는 자연 치유되므로 매번
+    Actions 메일을 보내면 진짜 쓰기 실패 신호를 무시하게 훈련시킨다)."""
+    def 가짜_bars(symbol, n=60):
+        if symbol == "005930":
+            return _삼성_bars()
+        if symbol == "000660":
+            raise TimeoutError("네트워크 타임아웃")
+        if symbol in _지수_bars:
+            return dict(_지수_bars[symbol])
+        raise AssertionError(symbol)
+
+    쓴것 = []
+    _기본_준비(monkeypatch, positions=보유_둘, write_capture=쓴것)
+    monkeypatch.setattr(close.naver, "fetch_bars", 가짜_bars)
+
+    rc = close.main()
+
+    assert rc == 0
     assert len(쓴것) == 1   # 백필은 0건, 확정만 1건
     body = 쓴것[0][1]
     assert body["is_final"] is True
@@ -576,3 +625,111 @@ def test_main_보유가_0건이면_확정_스냅샷도_커밋한다(monkeypatch,
     assert body["fail_count"] == 0
     assert body["is_final"] is True
     assert body["trading_days"] == ALL_DAYS
+
+
+# ---------------------------------------------------------------------------
+# 리뷰 2라운드 — 실제 사용 시나리오로 구성한 추가 테스트
+# ---------------------------------------------------------------------------
+
+def test_main_history_목록_조회가_실패해도_트레이스백_없이_확정만_시도한다(monkeypatch, capsys):
+    """F1: `gh.list_dir("history")` 가 어떤 try 에도 없었다. Contents API 5xx
+    는 일상적으로 벌어지는데, 그 자리에서 죽으면 그 아래 확정 quotes.json
+    갱신까지 통째로 못 하게 된다 — 백필 하루 못 채운 것보다 더 나쁘다.
+    무엇이 빠졌는지 모르니 이번 실행은 백필만 건너뛰고(todo=[]) 확정
+    단계는 계속 진행해야 한다."""
+    쓴것 = []
+    _기본_준비(monkeypatch, write_capture=쓴것)
+
+    def 깨진_목록(path):
+        if path == "history":
+            raise RuntimeError("GET .../contents/history -> 502: Bad Gateway")
+        raise AssertionError(f"예상 못한 디렉토리: {path}")
+
+    monkeypatch.setattr(close.gh, "list_dir", 깨진_목록)
+
+    rc = close.main()
+
+    # 백필은 0건(목록을 몰라 뭘 채워야 할지 모른다), 확정 quotes.json 은
+    # 정상적으로 1건 커밋된다 — history/ 목록과 무관한 별개 단계다.
+    assert len(쓴것) == 1
+    assert 쓴것[0][0] == close.QUOTES
+    # 읽기 실패(목록 조회)는 종료코드에 반영하지 않는다(리뷰 2라운드 10번).
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "history/ 목록 조회 실패" in out
+    assert "확정 시세 갱신" in out
+
+
+def test_main_거래정지_종목은_확정_스냅샷에_halted로_찍힌다(monkeypatch, capsys):
+    """F2: 확정 스냅샷의 status 가 "tradable" 로 하드코딩돼 있으면 거래정지
+    종목도 정상 거래로 찍힌다 — 설계 §5 가 정확히 막으려는 사고("이게 없으면
+    죽은 종목이 마지막 가격으로 영원히 살아 있게 된다"). naver.py 실측 모양
+    (시가·고가·저가 0, 종가만 값)을 최근일 봉에 심어 확인한다."""
+    latest_key = ALL_DAYS[-1].replace("-", "")
+    prior_key = ALL_DAYS[-2].replace("-", "")
+
+    def 가짜_bars(symbol, n=60):
+        if symbol == "005930":
+            return {
+                prior_key: {"open": 247000, "high": 248000, "low": 246000,
+                           "close": 247500, "volume": 100},
+                # 거래정지: 시가·고가·저가 0, 종가만 값(naver.py 실측 모양)
+                latest_key: {"open": 0, "high": 0, "low": 0,
+                            "close": 247500, "volume": 0},
+            }
+        if symbol in _지수_bars:
+            return dict(_지수_bars[symbol])
+        raise AssertionError(symbol)
+
+    쓴것 = []
+    _기본_준비(monkeypatch,
+             기존_history=[f"{d}.json" for d in ALL_DAYS[-30:]],  # 백필 대상 없음 — 확정만 본다
+             write_capture=쓴것)
+    monkeypatch.setattr(close.naver, "fetch_bars", 가짜_bars)
+
+    rc = close.main()
+
+    assert rc == 0
+    assert len(쓴것) == 1
+    body = 쓴것[0][1]
+    assert body["quotes"]["005930"]["price"] == 247500
+    assert body["quotes"]["005930"]["status"] == "halted"
+    assert body["quotes"]["005930"]["market"] == ""
+
+
+def test_history_파일의_positions는_닫힌_포지션도_그대로_담는다(monkeypatch, capsys):
+    """§6-3 이 요구하는 복구 사본은 positions.json 전체(열림+닫힘)의 그
+    실행 시점 스냅샷이다 — 오늘 종가 계산에 열린 것만 쓴다고(codes를
+    open_codes 로 좁힌 4번 수정) history/ 의 positions 필드까지 좁아지면
+    안 된다. snapshot_for 가 `state["positions"]`(전체)를 그대로 넣는지
+    직접 백필 결과로 확인한다 — 지금까지의 테스트는 전부 확정 바디
+    (쓴것[-1])만 봤지 history/ 바디를 mixed 상태로 검사한 적이 없었다.
+    누군가 나중에 snapshot_for 를 codes 인자를 받게 "최적화"하면 이 테스트가
+    막는다."""
+    def 가짜_bars(symbol, n=60):
+        if symbol == "005930":
+            return _삼성_bars()
+        if symbol == "999999":
+            raise AssertionError("닫힌 포지션 코드는 조회하면 안 된다")
+        if symbol in _지수_bars:
+            return dict(_지수_bars[symbol])
+        raise AssertionError(symbol)
+
+    쓴것 = []
+    _기본_준비(monkeypatch, positions=보유_열림_닫힘, write_capture=쓴것)
+    monkeypatch.setattr(close.naver, "fetch_bars", 가짜_bars)
+
+    rc = close.main()
+
+    assert rc == 0
+    백필_바디들 = [body for path, body, *_ in 쓴것 if path.startswith("history/")]
+    assert len(백필_바디들) == 2   # _기본_준비 기본값: 최근 2일 백필
+    for body in 백필_바디들:
+        코드들 = {p["code"] for p in body["positions"]}
+        assert 코드들 == {"005930", "999999"}   # 열림·닫힘 둘 다 있다
+        닫힌_항목 = next(p for p in body["positions"] if p["code"] == "999999")
+        assert 닫힌_항목["status"] == "closed"
+        assert 닫힌_항목["exits"][0]["price"] == 9000
+        # closes 는 오늘 값이 필요한 열린 종목만 담는다(닫힌 999999 는
+        # 조회조차 안 됐다 — 위 가짜_bars 의 AssertionError 로 이미 확인).
+        assert "999999" not in body["closes"]

@@ -26,6 +26,34 @@
 7. 보유가 0건이어도(`snapshot_for` 가 그런 날엔 항상 None 을 돌려준다)
    `quotes.build`/`should_commit` 을 거치도록 해 trading_days/benchmark 가
    계속 갱신되게 했다 — quotes.py 의 "진짜 무보유는 커밋한다" 원칙과 맞춘다.
+
+리뷰 2라운드(실제 사용 시나리오를 구성해 검증) 반영:
+
+8. `gh.list_dir("history")` 가 어떤 try 에도 없었다 — Contents API 5xx 는
+   일상적으로 벌어지는데, 여기서 죽으면 확정 quotes.json 갱신까지 통째로
+   못 하게 된다. try/except 로 감싸고, 실패하면 `todo=[]` 로 백필만
+   건너뛴 채 확정 단계로 계속 진행한다.
+9. 확정 스냅샷의 `status` 가 `"tradable"` 로 하드코딩돼 있었다. 거래정지
+   종목도 그날 일봉은 나온다(naver.py 실측: 시가·고가·저가 0, 종가만 값) —
+   그 모양의 봉이 `final["closes"]` 에 그대로 들어가 정지 종목이 "정상
+   거래"로 찍혔다. 이미 받아둔 봉만으로(추가 요청 없이) `open==high==low==0
+   and close>0` 이면 `"halted"`, 아니면 `"tradable"` 로 추정하게 고쳤다.
+   `"market"` 필드도 빈 문자열로 추가했다 — parse_polling(장중) 은 채우는
+   자리라 모양을 맞췄다.
+10. 종료코드를 "이번 실행에 문제가 있었나"에서 "쓰기 시도가 실패했나"로
+    좁혔다. 일봉 조회 실패(naver, 읽기)나 `gh.list_dir` 실패(GitHub, 읽기)는
+    이 모듈의 핵심 전제대로 다음 실행이 자연히 메운다 — 매번 실패로
+    표시하면 close.yml 에 `continue-on-error` 가 없어 사람에게 매번
+    이메일이 가고, 그게 잦아지면 정작 중요한 신호(쓰기 자체가 실패)를
+    무시하게 훈련시킨다. `history/*.json`·확정 `quotes.json` **쓰기**가
+    실패한 경우만 `problems` 에 쌓고 rc=1 로 낸다.
+11. `snapshot_for` 가 돌려주는 종가는 naver 가 조회 시점 기준으로 조정한
+    값이다(액면분할·무상증자가 있으면 과거 봉도 소급 재계산된다 — 실측:
+    2026-08 알테오젠(196170) 무상증자 전 종가는 틱 단위에 안 맞는 값,
+    이후는 전부 500원 단위로 딱 맞음). 그날 실시간으로 찍힌 `history/`
+    파일과, 그 뒤 분할·증자가 생긴 다음 이 모듈이 소급 채운 같은 날짜
+    파일은 그 비율만큼 어긋날 수 있다 — `price_basis` 필드로 그 사실을
+    스냅샷 자체에 남긴다(자세한 근거는 `snapshot_for` docstring).
 """
 from __future__ import annotations
 
@@ -62,12 +90,43 @@ def snapshot_for(day: str, bars: dict, state: dict):
     ⚠ 소급 생성분에서 `positions` 는 **그날의 것이 아니라 실행 시점의 현재 상태**다.
     `closes` 만 그날의 진짜 값이다. 복구 보험으로는 유효하지만 "그날의 보유 목록"으로
     읽으면 안 된다 (설계 §6-3).
+
+    ⚠ `closes` 는 **조회 시점 기준으로 조정된** 값이다. naver fchart 는 액면
+    분할·무상증자가 있으면 그 이전 날짜의 봉도 소급 재계산해서 돌려준다 —
+    가상이 아니라 실측 확인(2026-08-20, 알테오젠 196170, 신주배정기준일
+    2026-08-06 무상증자): 그 이전 날짜들의 종가는 500원 틱에 안 맞는 값
+    (예: 244301원)이고, 그 이후는 전부 500원 배수(예: 293500원)로 딱 맞는다
+    — 과거 봉이 새 주식 수 기준으로 나눠져서 재계산됐다는 뜻이다. 그래서
+    "그날 실시간으로 찍힌 `history/2026-07-20.json`"과 "그 뒤 분할·증자가
+    생긴 다음 이 모듈이 뒤늦게 채운 같은 날짜의 `history/2026-07-20.json`"은
+    같은 날짜인데도 그 비율만큼 다른 값을 담을 수 있다 — `history/` 는
+    write-once 라 이 결손도 영구적이다(위 5번 항목이 막는 결손과 같은
+    부류지만, 이건 코드로 감지할 방법이 없어 완전히 막지는 못한다. 최소한
+    `price_basis` 필드로 "이 값은 조회 시점 기준"이라는 사실을 스냅샷
+    자체에 남겨, 나중에 두 파일이 어긋난 걸 발견했을 때 원인을 바로 알 수
+    있게 한다).
     """
     key = day.replace("-", "")
     closes = {code: b[key]["close"] for code, b in bars.items() if key in b}
     if not closes:
         return None
-    return {"date": day, "closes": closes, "positions": state.get("positions", [])}
+    return {"date": day, "closes": closes, "positions": state.get("positions", []),
+            "price_basis": "asof-fetch"}
+
+
+def _status_for(bar: dict) -> str:
+    """일봉(OHLC) 하나에서 거래상태를 추정한다 — 추가 요청 없이, 이미 받아둔
+    값만으로. 거래정지 종목의 그날 봉은 시가·고가·저가가 0 이고 종가만 값이
+    있다(naver.py 실측: 000880, `20260819|0|0|0|83800|0`). 이 모양이면
+    `"halted"`, 아니면 `"tradable"` 로 본다.
+
+    상장폐지처럼 그 자체로 당일 봉이 아예 없는 경우는 `snapshot_for` 단계에서
+    이미 `closes` 에서 빠지므로(그 종목은 애초에 이 함수까지 오지 않는다)
+    여기서 다룰 대상이 아니다.
+    """
+    if bar.get("open") == 0 and bar.get("high") == 0 and bar.get("low") == 0 and bar.get("close", 0) > 0:
+        return "halted"
+    return "tradable"
 
 
 def main() -> int:
@@ -123,14 +182,31 @@ def main() -> int:
         print(f"[중단] 달력이 짧다({len(days)}일) — 잘못 메울 바에 쉰다")
         return 1
 
-    todo = missing_days(days, WINDOW, gh.list_dir("history"))
-    if not todo:
-        print("메울 날짜 없음")
+    try:
+        existing = gh.list_dir("history")
+    except Exception as e:
+        # gh.list_dir 는 404 이외의 모든 비정상 상태(1,000개 상한 등)에
+        # RuntimeError 를, 디렉토리가 아니면 NotADirectoryError 를 내고
+        # URLError 도 그대로 새어나온다 — Contents API 5xx 는 일상적으로
+        # 벌어진다. 여기서 안 잡으면 트레이스백으로 죽어서 그 아래 확정
+        # quotes.json 갱신까지 통째로 못 하게 된다 — 백필 하루 못 채운 것보다
+        # 화면이 밤새 확정 안 되는 쪽이 더 크다. 무엇이 빠졌는지 모르니 이번
+        # 실행은 백필만 건너뛴다 — 확정 단계는 history/ 목록과 무관하므로
+        # 계속 진행한다.
+        print(f"[경고] history/ 목록 조회 실패: {type(e).__name__}: {e} — "
+              f"이번 실행은 백필을 건너뛰고 확정 시세만 시도한다")
+        todo = []
+    else:
+        todo = missing_days(days, WINDOW, existing)
+        if not todo:
+            print("메울 날짜 없음")
 
-    # 이번 실행 안에서 벌어진 "문제"를 전부 여기 쌓는다 — 부분 성공 자체를
-    # 막지는 않되(그게 이 모듈의 핵심), 종료코드는 정직하게 실패로 낸다.
-    # 각 항목이 이번 실행에서 뭔가를 완전히 끝내지 못했다는 신호일 뿐, 다음
-    # 실행(하루 두 번)이 자연히 재시도하므로 데이터가 위험해지지는 않는다.
+    # 이번 실행 안에서 벌어진 "쓰기 실패"만 여기 쌓는다 — 종료코드는 이걸로
+    # 결정한다. 일봉/디렉토리 목록 같은 읽기 실패는 이 모듈의 핵심 전제대로
+    # 다음 실행이 자연히 메우고, close.yml 에 continue-on-error 가 없어
+    # 실패 시마다 사람에게 메일이 가므로 "매번 벌어지는 일"(네이버 타임아웃
+    # 등)까지 실패로 표시하면 정작 쓰기 자체가 실패하는(진짜 봐야 할) 신호를
+    # 무시하게 훈련시킨다.
     problems: list = []
 
     # n=WINDOW*2: missing_days 가 todo 를 항상 최근 WINDOW(30)거래일로만
@@ -146,8 +222,8 @@ def main() -> int:
         except Exception as e:
             print(f"[경고] 일봉 실패 {c}: {type(e).__name__}: {e}")
             fetch_failed.append(c)
-    if fetch_failed:
-        problems.append(f"일봉 실패 {len(fetch_failed)}건")
+    # fetch_failed 는 읽기 실패다 — problems(쓰기 실패, 종료코드용)에 넣지
+    # 않는다. 그래도 아래 게이트가 백필을 건너뛰게 하는 데는 그대로 쓰인다.
 
     made = 0
     if fetch_failed:
@@ -194,13 +270,29 @@ def main() -> int:
     # 정확히 구분하므로, `if final:` 로 따로 게이트하면 무보유일 때
     # trading_days/benchmark 갱신 자체가 스킵되는 문제가 생긴다(quotes.py
     # 의 "진짜 무보유는 커밋한다" 원칙과 어긋남).
+    latest_key = latest.replace("-", "")
     got = {}
     if final:
-        got = {c: {"price": v,
-                   "name": next((p["name"] for p in state["positions"]
-                                 if p["code"] == c), c),
-                   "status": "tradable"}
-               for c, v in final["closes"].items()}
+        for c, price in final["closes"].items():
+            got[c] = {
+                "price": price,
+                "name": next((p["name"] for p in state["positions"]
+                             if p["code"] == c), c),
+                # naver.py 실측: 거래정지 종목도 그날 봉은 나온다(시가·고가·
+                # 저가 0, 종가만 값). 하드코딩된 "tradable" 은 정지 종목을
+                # "정상 거래"로 잘못 표기했다 — 설계 §5 는 정확히 이걸
+                # quotes.json 의 종목별 status 로 기록하라고 요구한다
+                # ("이게 없으면 죽은 종목이 마지막 가격으로 영원히 살아
+                # 있게 된다"). c 는 final["closes"] 를 통해 왔으므로
+                # bars[c][latest_key] 는 snapshot_for 의 구성 방식상 항상
+                # 존재한다.
+                "status": _status_for(bars[c][latest_key]),
+                # parse_polling(장중)은 marketStatus 를 같이 준다(§6-2:
+                # "종목별 장 상태는 quotes[코드]['market'] 에 들어간다") —
+                # fchart 일봉에는 그 정보가 없다. 빈 문자열로 모양만 맞춰
+                # 화면이 이 키가 없다고 죽지 않게 한다.
+                "market": "",
+            }
     else:
         print(f"  {latest}: 확정할 종가 없음")
 

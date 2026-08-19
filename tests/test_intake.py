@@ -1,11 +1,27 @@
 # -*- coding: utf-8 -*-
-"""intake.py: 이슈 본문 → positions.json (Task 6, 리뷰 반영판).
+"""intake.py: 이슈 본문 → positions.json (Task 6, Stage 1 리뷰 반영판).
 
 공급된 테스트는 거의 그대로 두되, 딱 하나(손상된 항목 → 종료코드)만 리뷰
 포인트 4 에 따라 기대값을 2→3 으로 고쳤다 — 아래 해당 테스트의 주석 참조.
 그 외 리뷰 포인트(1/5/6/7)에 대응하는 테스트를 추가했다. 포인트 3/8 은
 코드를 바꿀 필요가 없다는 결론이라 별도 테스트 없이 기존/신규 테스트가
 이미 그 경로를 지나간다(본문 하단 설명 참조).
+
+Stage 1 리뷰(코드리뷰 C1/I1/I2/I3)에서 추가/수정된 테스트:
+
+- C1(Critical) — positions.json 최상위 구조가 손상되면(배열/키오타/dict/
+  null) 기존 보유가 조용히 전체 삭제되고 rc=0 이었던 결함. 네 가지 모양을
+  전부 intake.main() 으로 흘려보내 rc=3·미기록을 확인한다.
+- I1 — CorruptJSON → rc=3 분기가 직접 겨눈 테스트가 하나도 없어서
+  return 3 을 return 0 으로 바꿔도 전체 스위트가 녹색이었다. 전용 테스트를
+  추가했다.
+- I2 — write_json 에 실제로 뭐가 실리는지(기존 항목 생존, sha 전달)를
+  검증하는 테스트가 없어서 sha 를 None 으로 바꿔도 녹색이었다. 2건짜리
+  기존 상태로 라운드트립을 검증하는 테스트를 추가했다 — C1 도 같이 잡는다.
+- I3 — 중복 id 제출이 이제 exit 2(입력 거부) 대신 exit 4(이미 반영됨)로
+  나가는지, apply_sell 의 "보유 중이 아님"은 여전히 2 로 남는지 확인한다.
+- 쓰기 실패 테스트는 capsys 로 진단 메시지 출력까지 검증하도록 강화했다
+  (기존 버전은 try/except 래퍼를 통째로 지워도 통과했다).
 """
 import pytest
 
@@ -134,7 +150,10 @@ def test_알수없는_schema는_파일손상으로_거부한다(monkeypatch):
 # 사고다. main() 이 이걸 삼켜 2 나 3 을 돌려주면 워크플로가 "다시
 # 입력하라"거나 "파일을 고쳐라"는 엉뚱한 코멘트를 단다. 그대로 올라가
 # 0/2/3 어디에도 속하지 않는 실패로 남아야 한다.
-def test_쓰기_실패는_입력거부나_파일손상_코드로_감추지_않는다(monkeypatch):
+# capsys 로 실제 출력까지 확인한다 — try/except 래퍼 전체를 지워도(그냥
+# gh.write_json(...) 을 직접 부르게 해도) RuntimeError 는 어차피 그대로
+# 전파되므로 pytest.raises 만으로는 래퍼가 살아있는지 증명되지 않는다.
+def test_쓰기_실패는_입력거부나_파일손상_코드로_감추지_않는다(monkeypatch, capsys):
     monkeypatch.setattr(intake.gh, "read_json",
                         lambda *a, **k: (models.empty_state(), None))
 
@@ -145,6 +164,9 @@ def test_쓰기_실패는_입력거부나_파일손상_코드로_감추지_않�
     monkeypatch.setenv("ISSUE_BODY", BODY)
     with pytest.raises(RuntimeError):
         intake.main()
+    out = capsys.readouterr().out
+    assert "[오류]" in out
+    assert "재시도" in out
 
 
 # ---------------------------------------------------------------------------
@@ -214,3 +236,154 @@ def test_필수_필드가_없으면_어떤_필드인지_짐작할_수_있는_메
 # intake.main() 이 그 가짜를 쓴다는 것(패치가 먹힌다는 뜻), 그리고 그
 # 가짜가 파싱까지 끝난 dict 를 직접 돌려주므로 gh.CorruptJSON 경로는 전혀
 # 타지 않는다는 것(별개의, "파싱은 됐지만 항목이 이상함" 경로라는 뜻).
+
+
+# ---------------------------------------------------------------------------
+# 코드리뷰 C1(Critical) — positions.json 최상위 구조가 손상되면 기존 보유를
+# 조용히 전체 삭제하고 rc=0 으로 끝냈던 결함. 네 가지 실측 모양 전부 확인.
+# ---------------------------------------------------------------------------
+
+# 이 네 모양은 전부 "positions 배열만 잘라 고쳐서 파일 전체인 줄 알고
+# 도로 붙여넣기" 같은, 손편집에서 실제로 나올 수 있는 실수다(positions.json
+# 은 이 프로젝트가 제공하는 유일한 복구 경로가 손편집이라는 점에서 이게
+# 예외적인 상황이 아니라 예상 가능한 실패 모드다). 고치기 전 코드는 네
+# 경우 전부 rc=0, "이번 매수 하나만 든 새 positions.json" 을 기존 sha 위에
+# 그대로 커밋했다.
+@pytest.mark.parametrize("깨진_state", [
+    [{"id": "20260801-000660", "code": "000660", "name": "SK하이닉스",
+      "buys": [{"date": "2026-08-01", "price": 200000}], "status": "open"}],
+    {"schema": 1, "position": [   # "positions" 오타
+        {"id": "20260801-000660", "code": "000660", "name": "SK하이닉스",
+         "buys": [{"date": "2026-08-01", "price": 200000}], "status": "open"}]},
+    {"schema": 1, "positions": {"000660": {   # 리스트가 아니라 맵
+        "id": "20260801-000660", "code": "000660", "name": "SK하이닉스",
+        "buys": [{"date": "2026-08-01", "price": 200000}], "status": "open"}}},
+    {"schema": 1, "positions": None},
+], ids=["최상위가_배열", "positions_키오타", "positions가_dict", "positions가_null"])
+def test_최상위_구조가_손상되면_기존_보유를_지우지_않고_거부한다(monkeypatch, 깨진_state):
+    monkeypatch.setattr(intake.gh, "read_json", lambda *a, **k: (깨진_state, "sha"))
+    쓴것 = []
+    monkeypatch.setattr(intake.gh, "write_json", lambda *a, **k: 쓴것.append(a))
+    monkeypatch.setenv("ISSUE_BODY", BODY)
+    assert intake.main() == 3
+    assert 쓴것 == []
+
+
+# ---------------------------------------------------------------------------
+# 코드리뷰 I1 — CorruptJSON → 종료코드 3 분기를 직접 겨눈 테스트가 없었다.
+# ---------------------------------------------------------------------------
+
+# 이 분기(main() 안의 `except gh.CorruptJSON`)는 intake 의 가장 중요한
+# 안전판인데, return 3 을 return 0 으로 바꿔도 이전까지의 스위트가 전부
+# 녹색이었다(리뷰 지적) — 손상-항목 테스트의 가짜 read_json 은 파싱까지
+# 끝난 dict 를 직접 돌려줘서 CorruptJSON 경로를 아예 타지 않기 때문이다
+# (포인트 8 설명 참조). 여기서는 gh.CorruptJSON 자체를 올리는 가짜로
+# 직접 겨눈다.
+def test_CorruptJSON은_거부코드3을_돌려주고_아무것도_쓰지_않는다(monkeypatch):
+    def 가짜_읽기(*a, **k):
+        raise intake.gh.CorruptJSON("positions.json", "sha")
+
+    monkeypatch.setattr(intake.gh, "read_json", 가짜_읽기)
+    쓴것 = []
+    monkeypatch.setattr(intake.gh, "write_json", lambda *a, **k: 쓴것.append(a))
+    monkeypatch.setenv("ISSUE_BODY", BODY)
+    assert intake.main() == 3
+    assert 쓴것 == []
+
+
+# ---------------------------------------------------------------------------
+# 코드리뷰 I2 — write_json 에 실제로 뭐가 실리는지 검증하는 테스트가 없었다.
+# ---------------------------------------------------------------------------
+
+# 이전까지 write_json 에 닿는 테스트는 전부 models.empty_state() 에서
+# 출발했다 — 그래서 "기존 보유가 라운드트립에서 살아남는다"와 "sha 가
+# 그대로 전달된다"는 아무 테스트도 검증하지 않았다. sha 를 None 으로
+# 바꿔치기해도(실제로는 기존 파일에 대해 sha 없는 PUT → GitHub 422)
+# 스위트가 전부 녹색이었을 것이다. 2건짜리 기존 상태로 라운드트립을
+# 검증하면 이 구멍과 C1 을 동시에 잡는다.
+def test_기존_보유가_반영_후에도_살아있고_sha가_그대로_전달된다(monkeypatch):
+    기존 = {"schema": 1, "positions": [
+        {"id": "20260801-000660", "code": "000660", "name": "SK하이닉스",
+         "buys": [{"date": "2026-08-01", "price": 200000}],
+         "exits": [], "adjustments": [], "status": "open",
+         "source": "수동", "memo": "", "signal_date": None},
+        {"id": "20260805-035420", "code": "035420", "name": "NAVER",
+         "buys": [{"date": "2026-08-05", "price": 210000}],
+         "exits": [], "adjustments": [], "status": "open",
+         "source": "수동", "memo": "", "signal_date": None},
+    ]}
+    monkeypatch.setattr(intake.gh, "read_json", lambda *a, **k: (기존, "SHA123"))
+    captured = {}
+
+    def 가짜_쓰기(path, body, sha, message):
+        captured["path"] = path
+        captured["body"] = body
+        captured["sha"] = sha
+
+    monkeypatch.setattr(intake.gh, "write_json", 가짜_쓰기)
+    monkeypatch.setenv("ISSUE_BODY", BODY)
+    assert intake.main() == 0
+    assert captured["path"] == intake.POSITIONS
+    assert captured["sha"] == "SHA123"
+    ids = {p["id"] for p in captured["body"]["positions"]}
+    assert ids == {"20260801-000660", "20260805-035420", "20260819-005930"}
+
+
+# ---------------------------------------------------------------------------
+# 코드리뷰 I3 — 중복 제출은 "입력 거부"(2)가 아니라 "이미 반영됨"(4)이다.
+# ---------------------------------------------------------------------------
+
+# exit 2 의 워크플로 안내는 "고쳐서 다시 제출"이다. 중복 id 를 "고치는"
+# 가장 쉬운 방법은 날짜를 바꾸는 것인데, 그러면 실제로는 없었던 매매가
+# 진짜로 파일에 새로 기록된다. exit 4 는 "추가 조치가 필요 없다"는 결론을
+# 그대로 말해서 그 함정을 없앤다.
+def test_중복_id_제출은_이미반영_코드로_구분한다(monkeypatch):
+    기존 = {"schema": 1, "positions": [
+        {"id": "20260819-005930", "code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-08-19", "price": 247500}],
+         "exits": [], "adjustments": [], "status": "open",
+         "source": "종가베팅", "memo": "눌림", "signal_date": "2026-08-18"},
+    ]}
+    monkeypatch.setattr(intake.gh, "read_json", lambda *a, **k: (기존, "sha"))
+    쓴것 = []
+    monkeypatch.setattr(intake.gh, "write_json", lambda *a, **k: 쓴것.append(a))
+    monkeypatch.setenv("ISSUE_BODY", BODY)
+    assert intake.main() == 4
+    assert 쓴것 == []
+
+
+def test_보유중이_아닌_매도는_여전히_입력거부_2다(monkeypatch):
+    """apply_sell 의 '보유 중이 아님'은 이미 팔았는지/애초에 안 샀는지/
+    코드를 잘못 썼는지 구분할 수 없다 — AlreadyApplied 대상이 아니라
+    그대로 2 에 남아야 한다(코드리뷰 I3, apply_buy 의 중복-id 와는 다르게
+    취급)."""
+    monkeypatch.setattr(intake.gh, "read_json",
+                        lambda *a, **k: (models.empty_state(), None))
+    sell = '```json\n{"op":"sell","code":"005930","price":1,"date":"2026-08-19"}\n```'
+    monkeypatch.setenv("ISSUE_BODY", sell)
+    assert intake.main() == 2
+
+
+# ---------------------------------------------------------------------------
+# 벨트 앤 브레이시스 — apply() 이후 보유 건수가 줄면(정상 경로로는 불가능)
+# 쓰지 않고 시끄럽게 죽는다.
+# ---------------------------------------------------------------------------
+
+def test_반영_후_건수가_줄면_쓰지_않고_예외로_죽는다(monkeypatch):
+    기존 = {"schema": 1, "positions": [
+        {"id": "20260801-000660", "code": "000660", "name": "SK하이닉스",
+         "buys": [{"date": "2026-08-01", "price": 200000}],
+         "exits": [], "adjustments": [], "status": "open",
+         "source": "수동", "memo": "", "signal_date": None},
+    ]}
+    monkeypatch.setattr(intake.gh, "read_json", lambda *a, **k: (기존, "sha"))
+    # apply() 자체가 미래에 버그로 항목을 잃어버리는 상황을 흉내낸다 —
+    # 위의 C1/normalize 가드는 전부 통과한 뒤에도 최후의 저지선이 있는지
+    # 확인한다.
+    monkeypatch.setattr(intake, "apply", lambda state, req: models.empty_state())
+    쓴것 = []
+    monkeypatch.setattr(intake.gh, "write_json", lambda *a, **k: 쓴것.append(a))
+    monkeypatch.setenv("ISSUE_BODY", BODY)
+    with pytest.raises(AssertionError):
+        intake.main()
+    assert 쓴것 == []

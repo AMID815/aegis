@@ -35,6 +35,18 @@ class RejectedError(Exception):
     """입력이 규칙에 맞지 않아 반영하지 않았다."""
 
 
+class AlreadyApplied(RejectedError):
+    """중복 id — 이미 반영된 매수. 값을 "고쳐서 다시 제출"해야 하는 일반
+    RejectedError 와는 성격이 다르다 — 이 요청은 틀린 게 아니라 이미 끝난
+    것이라, 호출자(intake.py)가 종료코드를 다르게 매길 수 있게 별도
+    클래스로 뗀다(코드리뷰 I3). pid 를 속성으로 들고 있어 메시지를 다시
+    파싱하지 않아도 된다."""
+
+    def __init__(self, pid: str):
+        self.pid = pid
+        super().__init__(f"이미 있는 기록: {pid}")
+
+
 def empty_state() -> dict:
     return {"schema": SCHEMA, "positions": []}
 
@@ -82,14 +94,33 @@ def normalize(raw, dropped=None) -> dict:
 
     schema 가 있는데 현재 버전과 다르면 절반만 고쳐 쓰지 않고 통째로 거부한다.
     dropped 를 넘기지 않으면(기본값 None) 예전처럼 조용히 격리만 한다.
+
+    최상위 구조 자체가 이상하면(dict 가 아니거나 positions 가 list 가
+    아니거나 — 손편집으로 배열을 통째로 붙여넣거나 키 이름을 오타내는 등)
+    빈 상태를 돌려주는 건 그대로다. 하지만 그 사실을 dropped 에도 반드시
+    남긴다 — 안 남기면 호출자(intake.py)의 "버려진 게 있으면 쓰지 않는다"
+    가드가 못 보고 지나쳐서, 기존 항목 전체가 새 항목 하나로 조용히
+    덮어써진다(코드리뷰 C1 — 예: positions 배열만 잘라 고친 뒤 파일
+    전체인 줄 알고 덮어쓰기).
     """
     if not isinstance(raw, dict):
+        if dropped is not None:
+            # 개별 항목 단위로 "무엇을 버렸는지" 말할 수 없는 경우라, 파일
+            # 전체를 가리키는 합성 마커를 넣는다. 호출자는 p.get("id") or
+            # p.get("code") 로 dropped 항목을 읽으므로 dict 모양을 유지한다.
+            dropped.append({"id": "(파일 전체)",
+                            "note": f"최상위가 dict 아님: {type(raw).__name__}"})
         return empty_state()
     schema = raw.get("schema")
     if schema is not None and schema != SCHEMA:
         raise RejectedError(f"알 수 없는 schema: {schema!r}")
     items = raw.get("positions")
     if not isinstance(items, list):
+        if dropped is not None:
+            # 위와 같은 이유. "positions" 키가 없거나(오타) list 가 아니면
+            # 실제로는 멀쩡할 수 있는 기존 항목들이 통째로 안 보이게 된다.
+            dropped.append({"id": "(파일 전체)",
+                            "note": f"positions 가 list 아님: {type(items).__name__}"})
         return empty_state()
     good = []
     for p in items:
@@ -153,7 +184,7 @@ def apply_buy(state: dict, req: dict) -> dict:
     pid = f"{date.replace('-', '')}-{code}"
     state = normalize(state)
     if any(p["id"] == pid for p in state["positions"]):
-        raise RejectedError(f"이미 있는 기록: {pid}")
+        raise AlreadyApplied(pid)
     sig = req.get("signal_date") or None
     if sig:
         sig = _date(sig)

@@ -9,16 +9,24 @@
 종료코드는 워크플로가 그대로 읽어 사용자에게 다른 코멘트를 다는 계약이다:
 
   0 = 반영됨 — 아무 것도 안 해도 됨
-  2 = **이 이슈의 입력**이 틀림(형식/중복/미보유 등) — 고쳐서 다시 제출
-  3 = **positions.json 자체**를 못 믿음(깨짐/스키마 불일치/개별 항목 손상)
-      — 이 이슈에 뭘 적어 냈든 똑같이 막힌다. 사람이 파일을 손으로 고치기
-      전엔 재제출해도 소용없다. 그래서 2 와 분리한다(코드리뷰 포인트 4).
+  2 = **이 이슈의 입력**이 틀림(형식/미보유 등) — 고쳐서 다시 제출
+  3 = **positions.json 자체**를 못 믿음(깨짐/스키마 불일치/최상위 구조
+      이상/개별 항목 손상) — 이 이슈에 뭘 적어 냈든 똑같이 막힌다. 사람이
+      파일을 손으로 고치기 전엔 재제출해도 소용없다. 그래서 2 와
+      분리한다(코드리뷰 포인트 4).
+  4 = **이미 반영됨**(동일 id 중복 매수) — 고칠 것도, 기다릴 것도 없다.
+      "다시 제출"을 안내하면 사용자는 날짜를 바꿔 재제출하기 쉬운데, 그건
+      가짜 매매 기록을 파일에 새로 심는 것이다(코드리뷰 I3). 그래서 2 와
+      분리한다. apply_sell 의 "보유 중이 아님"은 이미 팔았는지/애초에 안
+      샀는지/코드를 잘못 썼는지 이 코드가 구분할 수 없어 그대로 2 에
+      남긴다.
 
-이 둘 중 어디에도 안 속하는 실패(쓰기 API 409/5xx, ISSUE_BODY 환경변수
-자체가 없는 워크플로 배선 문제 등)는 조용히 삼켜 2/3 으로 뭉개지 않고
-그대로 올려보낸다 — 재시도나 설정 수정으로 풀릴 별개의 사고를 "입력을
-고쳐라"/"파일을 고쳐라"로 잘못 안내하면 안 되기 때문이다(코드리뷰 포인트
-5, 7). GitHub Actions 는 이걸 그냥 "실패한 스텝"으로 본다.
+이 중 어디에도 안 속하는 실패(쓰기 API 409/5xx, ISSUE_BODY 환경변수 자체가
+없는 워크플로 배선 문제, "반영 후 보유 건수가 줄었다"는 내부 불변식 위반
+등)는 조용히 삼켜 2/3/4 로 뭉개지 않고 그대로 올려보낸다 — 재시도나 설정
+수정으로 풀릴 별개의 사고를, 또는 코드 버그 그 자체를 "입력을 고쳐라"/
+"파일을 고쳐라"로 잘못 안내하면 안 되기 때문이다(코드리뷰 포인트 5, 7).
+GitHub Actions 는 이걸 그냥 "실패한 스텝"으로 본다.
 """
 from __future__ import annotations
 
@@ -34,6 +42,11 @@ from . import gh, models
 # 이 코드가 추측하면 안 된다 — extract() 가 개수를 직접 세서 판단한다
 # (코드리뷰 포인트 1).
 FENCE = re.compile(r"```json\s*(.+?)\s*```", re.S)
+# GitHub 이슈 본문은 65,536자까지 허용하지만, 실제 페이로드(name 40자·
+# source 20자·memo 200자 — models._text 상한)는 아무리 늘려 잡아도 수백
+# 바이트다. 8000 은 그 실제 필요량보다 훨씬 크게 잡은 파손/DoS 방지용
+# 상한이지, 정상적인 긴 메모를 거부할 만큼 타이트하지 않다(코드리뷰
+# 포인트 2).
 MAX_BODY = 8000
 POSITIONS = "positions.json"
 
@@ -45,8 +58,10 @@ def extract(body: str) -> dict:
     뭐라고 적었는가"이지 positions.json 상태와는 무관하다. 그래서 여기서
     올리는 예외는 main() 에서 항상 종료코드 2(입력 거부)로 이어진다.
     """
-    if not isinstance(body, str) or len(body) > MAX_BODY:
-        raise models.RejectedError("본문이 없거나 너무 김")
+    if not isinstance(body, str):
+        raise models.RejectedError("본문이 문자열이 아님")
+    if len(body) > MAX_BODY:
+        raise models.RejectedError(f"본문이 너무 김({len(body)}자 > {MAX_BODY})")
     blocks = list(FENCE.finditer(body))
     if not blocks:
         raise models.RejectedError("json 블록 없음")
@@ -77,16 +92,20 @@ def apply(state: dict, req: dict) -> dict:
     raise models.RejectedError(f"모르는 op: {op!r}")
 
 
-def _clean_for_message(v, limit: int = 60):
-    """커밋 메시지에 넣기 전에 방어적으로 정리한다.
+def _single_line(v, limit: int = 40):
+    """개행을 공백으로 지우고 limit 자로 자른 한 줄짜리 문자열을 돌려준다
+    (문자열이 아니면 None). 커밋 메시지 조립 전용 — positions.json 에
+    "저장"되는 값의 검증(models._text)과는 별개다.
 
-    models._text 는 positions.json 에 "저장"되는 값의 길이만 자르고
-    개행·제어문자는 막지 않는다(strict 가 아닌 필드는 조용히 자르기만
-    한다는 게 models 의 기존 결정이고, 그건 안 건드린다). 하지만 커밋
-    메시지 조립은 그 검증을 거치지 않은 req 원본을 그대로 쓸 수 있어서
-    별개의 위험이다 — name 에 개행이 섞이면 git 로그에 여러 줄짜리(또는
-    위조처럼 보이는) 커밋 메시지가 남는다(코드리뷰 포인트 6). 그래서
-    커밋 메시지용으로 한 번 더, 별도로 정리한다.
+    models._text 는 길이만 자르고 개행·제어문자는 막지 않는다(strict 가
+    아닌 필드는 조용히 자르기만 한다는 게 models 의 기존 결정이고, 그건
+    안 건드린다). 하지만 커밋 메시지 조립은 그 검증을 거치지 않은 req
+    원본을 직접 쓸 수 있어서 별개의 위험이다 — name 에 개행이 섞이면 git
+    로그에 여러 줄짜리 커밋이 생기고, 빈 줄 뒤에 `Key: value` 모양의 줄이
+    오면 git 이 그걸 실제 트레일러(예: `Co-authored-by:`)로 해석해버린다
+    (실측 확인 — 코드리뷰 포인트 6). limit 은 60 이 아니라 40 이다 —
+    positions.json 에 저장되는 name 상한(models._text(..., 40, ...))과
+    맞춰서, 커밋 메시지에 파일에는 없는 글자가 보이는 일이 없게 한다.
     """
     if not isinstance(v, str):
         return None
@@ -121,6 +140,21 @@ def main() -> int:
         print(f"[중단] {e}")
         return 3
 
+    # normalize() 를 부르기 전에 최상위 모양부터 직접 본다. normalize() 도
+    # (아래에서) 같은 상황을 dropped 마커로 보고하긴 하지만, intake.py는
+    # 자기 docstring에 "읽은 걸 안 믿는다"고 적어놓은 쓰기 쪽이다 — 그
+    # 신뢰를 normalize() 내부 구현 하나에만 의존하면 안 된다. 이 파일이
+    # 손편집으로 배열(`[...]`)만 남거나, "positions" 키가 오타나거나,
+    # dict/None 등 엉뚱한 타입이 되면 여기서 바로 멈춘다. 안 그러면
+    # 아래 normalize() 가 조용히 빈 상태를 돌려주고, 그 위에 이번 매수
+    # 하나만 얹은 파일이 기존 sha 위에 그대로 커밋된다 — 기존 보유 전체가
+    # 삭제되는데 종료코드는 0, 워크플로는 "반영했습니다"로 닫는다
+    # (코드리뷰 C1, 실측: 배열/키오타/positions가 dict/positions가 null
+    # 네 가지 모양 전부 이 경로 없이는 rc=0으로 전체 삭제됐다).
+    if not (isinstance(state, dict) and isinstance(state.get("positions"), list)):
+        print("[중단] positions.json 최상위 구조가 예상과 다름 — 파일에 손대지 않는다")
+        return 3
+
     bad = []
     try:
         state = models.normalize(state, bad)
@@ -135,39 +169,61 @@ def main() -> int:
     if bad:
         # 손상된 항목이 하나라도 있으면 여기서 그냥 진행하면 normalize 가
         # 버린 항목이 이 커밋으로 영구 삭제된다 — positions.json 은 다시
-        # 만들 수 없는 파일이다(코드리뷰 C1). 이것도 이 이슈의 입력과
-        # 무관하게 파일 자체에 이미 있던 문제이므로, 바로 위 schema
-        # 불일치와 같은 이유로 3(코드리뷰 포인트 4 — 애초 초안은 여기를
-        # 2 로 뒀는데, "재제출해도 이 손상은 그대로"라는 점에서 3 이
-        # 맞다).
+        # 만들 수 없는 파일이다(코드리뷰 C1). 위 최상위 구조 가드를
+        # 통과했더라도 normalize() 는 "id 는 있는데 buys 가 이상함" 같은
+        # 개별 항목 손상, 그리고(이론상) 위 가드가 놓친 최상위 이상까지
+        # 같은 dropped 채널로 보고한다 — 이것도 이 이슈의 입력과 무관하게
+        # 파일 자체에 이미 있던 문제이므로, 바로 위 schema 불일치와 같은
+        # 이유로 3(코드리뷰 포인트 4 — 애초 초안은 여기를 2 로 뒀는데,
+        # "재제출해도 이 손상은 그대로"라는 점에서 3 이 맞다).
         ids = [p.get("id") or p.get("code") for p in bad]
         print(f"[중단] 해석 불가 항목 {len(bad)}건 — 파일에 손대지 않는다: {ids}")
         return 3
+    prior_count = len(state["positions"])
 
     try:
         out = apply(state, req)
+    except models.AlreadyApplied as e:
+        # 중복 id — 이 요청은 "틀린" 게 아니라 "이미 끝난" 것이다. 2 로
+        # 나가면 사용자가 "다시 제출"하다가 날짜를 바꿔서라도 통과시키기
+        # 쉬운데, 그건 가짜 매매 기록을 파일에 새로 심는 것이다. 결론을
+        # 그대로 말해 추가 조치가 필요 없다는 걸 알린다(코드리뷰 I3).
+        print(f"이미 반영되어 있음 — 추가 조치 불필요: {e.pid}")
+        return 4
     except models.RejectedError as e:
         print(f"거부: {e}")
         return 2
+
+    if len(out["positions"]) < prior_count:
+        # 벨트 앤 브레이시스: 여기까지 온 이상 위의 가드들(최상위 구조,
+        # dropped)이 전부 통과했으니 정상적으로는 절대 줄어들 수 없다
+        # (buy 는 +1, sell 은 개수 불변). 그런데도 줄었다면 이 코드
+        # 자신의 버그이지 사용자 입력도 파일 손상도 아니다 — "고쳐서
+        # 다시 제출"도 "파일을 손보라"도 오답이라 2/3/4 어디에도 넣지
+        # 않고 시끄럽게 죽는다.
+        raise AssertionError(
+            f"반영 후 보유 건수가 줄어듦({prior_count} → {len(out['positions'])}) "
+            f"— 쓰지 않고 중단, 코드 버그 의심")
 
     op = req.get("op")
     # code/date 는 이 시점에 이미 apply() 안의 _code()/_date() 를 통과했다
     # — 둘 다 글자 집합이 정규식(`\Z` 앵커, 개행 불가)으로 고정돼 있어
     # name 과 달리 커밋 메시지용 별도 정리가 필요 없다.
-    name = _clean_for_message(req.get("name")) or req.get("code")
+    name = _single_line(req.get("name")) or req.get("code")
     message = f"{op}: {name} ({req.get('date')})"
     try:
         gh.write_json(POSITIONS, out, sha, message)
     except RuntimeError as e:
         # 전송 실패(409 sha 충돌, 5xx 등)는 "입력이 틀렸다"도 "파일이
         # 망가졌다"도 아니다 — 재시도나 다음 실행에서 자연히 풀릴 수 있는
-        # 별개의 사고다. 2/3 으로 뭉뚱그리면 워크플로가 엉뚱한 안내
-        # 코멘트를 단다. 여기서 삼키지 않고 그대로 올려 0/2/3 밖의
-        # 실패로 남긴다 — 메시지는 이미 gh._api 가 method·path·상태코드·
-        # 본문을 담아 채워준다(코드리뷰 포인트 5).
+        # 별개의 사고다. 2/3/4 로 뭉뚱그리면 워크플로가 엉뚱한 안내
+        # 코멘트를 단다. 여기서 삼키지 않고 그대로 올려 그 밖의 실패로
+        # 남긴다 — 메시지는 이미 gh._api 가 method·path·상태코드·본문을
+        # 담아 채워준다(코드리뷰 포인트 5).
         print(f"[오류] positions.json 쓰기 실패 — 재시도 필요, 파일 문제 아님: {e}")
         raise
-    print(f"반영: {op} {req.get('code')} — 보유 {len(out['positions'])}건")
+    held = sum(1 for p in out["positions"] if p["status"] == models.OPEN)
+    print(f"반영: {op} {req.get('code')} — 보유 {held}건")
     return 0
 
 

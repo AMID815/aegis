@@ -173,6 +173,71 @@ def test_알수없는_schema는_거부한다():
         models.normalize({"schema": 2, "positions": []})
 
 
+# ── 코드리뷰 C1: 최상위 구조가 통째로 이상하면 dropped 에도 남겨야 한다 ──
+#
+# 고치기 전에는 raw 가 dict 가 아니거나 positions 가 list 가 아니면
+# empty_state() 만 조용히 돌려주고 dropped 는 건드리지 않았다. 그러면
+# intake.py 의 "dropped 가 있으면 안 쓴다" 가드가 못 보고 지나가서, 기존
+# positions.json 전체가 이번 매수 하나로 덮어써지는 사고로 이어진다
+# (실측: 배열/키오타/positions가 dict/positions가 null 네 가지 모양 전부).
+# 여기서는 "빈 상태가 돌아온다"는 기존 계약(위 test_손상된_파일은_
+# 빈_상태로_격리한다)은 그대로 두고, dropped 채널로도 반드시 알려지는지만
+# 확인한다.
+
+def test_최상위가_dict가_아니면_dropped에_파일전체_마커를_남긴다():
+    dropped = []
+    out = models.normalize([{"code": "005930"}], dropped)   # 배열을 통째로 붙여넣은 경우
+    assert out == models.empty_state()
+    assert len(dropped) == 1
+    assert dropped[0]["id"] == "(파일 전체)"
+
+
+def test_positions가_list가_아니면_dropped에_파일전체_마커를_남긴다():
+    dropped = []
+    out = models.normalize(
+        {"schema": 1, "positions": {"000660": {"code": "000660"}}}, dropped)  # map
+    assert out == models.empty_state()
+    assert len(dropped) == 1
+    assert dropped[0]["id"] == "(파일 전체)"
+
+
+def test_positions_키가_없어도_dropped에_파일전체_마커를_남긴다():
+    dropped = []
+    out = models.normalize({"schema": 1, "position": []}, dropped)   # 키 오타
+    assert out == models.empty_state()
+    assert len(dropped) == 1
+
+
+def test_positions가_null이어도_dropped에_파일전체_마커를_남긴다():
+    dropped = []
+    out = models.normalize({"schema": 1, "positions": None}, dropped)
+    assert out == models.empty_state()
+    assert len(dropped) == 1
+
+
+def test_dropped를_안_넘기면_최상위_손상도_예전처럼_조용히_격리만_한다():
+    # dropped=None(기본값) 호출자는 여전히 아무 예외 없이 빈 상태만 받는다
+    # — 이 인자를 넘기지 않는 기존 호출부(있다면)를 깨지 않는다는 확인.
+    assert models.normalize([{"code": "005930"}]) == models.empty_state()
+
+
+# ── 코드리뷰 I3: 중복 id 는 일반 RejectedError 와 다른 클래스로 구분한다ㅡ
+
+def test_중복_id는_AlreadyApplied를_낸다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    with pytest.raises(models.AlreadyApplied) as exc_info:
+        models.apply_buy(d, {
+            "code": "005930", "name": "삼성전자", "price": 250000, "date": "2026-08-19"})
+    assert exc_info.value.pid == "20260819-005930"
+
+
+def test_AlreadyApplied는_RejectedError의_하위클래스라_기존_검사에도_잡힌다():
+    # test_같은_종목_같은_날_중복매수는_거부한다 가 pytest.raises(RejectedError)
+    # 로 여전히 통과해야 한다는 걸 명시적으로 고정한다.
+    assert issubclass(models.AlreadyApplied, models.RejectedError)
+
+
 def test_status가_open_closed가_아니면_격리한다():
     raw = {"schema": 1, "positions": [
         {"code": "005930", "name": "삼성전자",

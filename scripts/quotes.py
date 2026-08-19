@@ -5,12 +5,21 @@
 수 있고, 여기서 멈추면 화면만 낡는다 — intake.py(거부)·close.py(중단)와는
 다른 결정이다. 대신 개수를 스냅샷에 실어 화면(§7/§8)이 말하게 한다.
 
+**단, "보유 0건"과 "전부 격리(dropped)돼서 0건으로 보인 것"은 다르다.**
+전자는 실패가 아니라서 커밋해야 하고(달력·시각 갱신), 후자를 그대로
+통과시키면 정상 quotes.json 이 빈 스냅샷으로 덮이고 fresh as_of_kst 가
+§7 의 stale 배지를 조용히 재운다 — 이 모듈이 막으려는 바로 그 사고(§8).
+`should_commit` 이 이 둘을 가른다.
+
 **이 모듈은 넓게 잡는다.** naver.fetch_quotes 는 배치 안에서 에러를
 격리하지 않는다 — 부분적으로만 성공한 스냅샷은 신선한 값과 낡은 값이
 섞여, 진짜 상장폐지와 구분이 안 가기 때문이다. 그래서 이 모듈은 커밋
-직전까지 벌어지는 모든 예외를 넓게 잡아 "커밋하지 않는다 = 직전 값 유지"
-로 수렴시킨다 — positions 조회(스키마 불일치·CorruptJSON·API 오류 모두
-포함), 시세, 달력, quotes.json 자체의 sha 조회까지.
+직전까지 벌어지는 실패를 넓게 잡아 "커밋하지 않는다 = 직전 값 유지"로
+수렴시킨다 — positions 조회, 시세, 달력, quotes.json 자체의 sha 조회까지.
+단 positions 조회(넓게)와 정규화(좁게, RejectedError 하나뿐)는 서로 다른
+try 로 나눈다 — 한 블록에 몰아두면 normalize() 자신의 버그(TypeError 등)
+까지 "positions 를 읽을 수 없다"로 뭉개져 코드 버그가 코드 버그로
+보이지 않는다.
 """
 from __future__ import annotations
 
@@ -23,6 +32,11 @@ QUOTES = "quotes.json"
 POSITIONS = "positions.json"
 KST = dt.timezone(dt.timedelta(hours=9))
 INDEX = {"KOSPI": "KOSPI", "KOSDAQ": "KOSDAQ"}
+
+# models.normalize() 가 최상위 구조 자체를 못 읽었을 때(positions 가 list
+# 아님 등) dropped 에 싣는 합성 마커. 개별 항목 손상과 구분하는 데 쓴다 —
+# 아래 main() 참조.
+WHOLE_FILE_MARKER = "(파일 전체)"
 
 
 def now_kst() -> str:
@@ -54,7 +68,9 @@ def open_codes(state: dict) -> list:
 
 
 def build(got: dict, asked: list, days: list, bench: dict,
-          now_kst: str, is_final: bool, dropped: int = 0) -> dict:
+          now_kst: str, is_final: bool, dropped: int = 0,
+          bench_history: dict | None = None,
+          benchmark_failed: list | None = None) -> dict:
     # 매개변수 이름 `now_kst` 가 모듈 전역 함수 `now_kst()` 를 이 함수
     # 몸통 안에서 가린다. 지금은 무해하다 — 아래에서 함수를 호출하지
     # 않고 이미 계산된 문자열 값을 그대로 담기만 한다(호출자인 main() 이
@@ -71,17 +87,39 @@ def build(got: dict, asked: list, days: list, bench: dict,
         "positions_dropped": dropped,   # 화면이 이걸 보고 경고를 띄운다
         "trading_days": days,
         "benchmark": bench,
+        # 최신 레벨(benchmark)만으로는 §6-2 가 든 이유("같은 기간 지수
+        # 수익률")를 계산할 수 없다 — 그 계산에 필요한 과거 값을 같이
+        # 싣는다. trading_days 와 같은 YYYY-MM-DD 키라 날짜로 바로
+        # 대조된다. 요청 수는 늘지 않는다(fetch_benchmark 참조).
+        "benchmark_history": bench_history or {},
+        # 로그는 아무도 안 본다 — 화면이 말하게 한다(§8). 지수 하나가
+        # 계속 실패해도 요약 박스에서 "숫자 하나가 조용히 빠진 것"으로만
+        # 보이면 아무도 못 알아챈다.
+        "benchmark_failed": benchmark_failed or [],
         "quotes": got,
     }
 
 
 def should_commit(snap: dict) -> bool:
-    """전부 실패했을 때만 안 쓴다. 보유 0건은 실패가 아니다."""
+    """전부 실패했을 때만 안 쓴다. 보유 0건은 실패가 아니다 — 단, 그 0건이
+    "진짜 무보유"가 아니라 "정규화 과정에서 전부 격리(dropped)돼서 0건으로
+    보인 것"이면 실패로 취급한다. 두 경우 모두 ok_count==fail_count==0 이라
+    ok_count/fail_count 만으로는 구분이 안 된다 — positions_dropped 를
+    같이 봐야 한다."""
     asked = snap["ok_count"] + snap["fail_count"]
-    return asked == 0 or snap["ok_count"] > 0
+    if asked == 0:
+        return snap["positions_dropped"] == 0
+    return snap["ok_count"] > 0
 
 
-def fetch_benchmark() -> dict:
+def _iso_day(d: str) -> str:
+    """`YYYYMMDD` → `YYYY-MM-DD`. naver.trading_days 가 만드는 것과 같은
+    포맷 — 나중에 이 값을 trading_days 와 날짜로 대조하려면(§6-2, Task 12
+    가 보유기간 지수 수익률을 계산할 때) 형식이 같아야 한다."""
+    return f"{d[:4]}-{d[4:6]}-{d[6:]}"
+
+
+def fetch_benchmark() -> tuple:
     """지수는 있으면 좋은 것 — 하나가 실패해도 나머지·본 실행을 막지 않는다.
 
     `bars[max(bars)]` — 키는 `YYYYMMDD` 8자리 고정폭이라 문자열 최댓값이
@@ -93,40 +131,75 @@ def fetch_benchmark() -> dict:
     중 실시간으로 갱신되는 값이다. 그래서 장중 스냅샷은 "개별 종목은
     방금 가격, 지수는 어제 종가"가 섞인다 — 알려진 비대칭이고, 이 모듈은
     파생 지표(수익률 등)를 계산하지 않으므로(페이지 몫) 여기서 고칠 문제가
-    아니다. 지수의 장중 실시간 값을 받으려면 이 함수가 아니라 별도
-    조사(폴링 엔드포인트가 지수 코드를 받는지 등)가 먼저 필요하다 — 지금
-    실측된 사실("Index symbols KOSPI/KOSDAQ return fractional closes via
-    fetch_bars")의 범위 밖이라 손대지 않는다.
+    아니다.
+
+    **n=250 을 쓰는 이유**: naver.fetch_bars 는 한 번의 요청으로 최근 n일치
+    전체를 돌려준다 — n=2 를 n=250 으로 올려도 요청 수는 그대로다(0 증가).
+    §6-2 는 벤치마크를 두는 이유로 "같은 기간 지수 수익률이 없으면 '장이
+    좋아서 번 것'과 '스크리너가 좋아서 번 것'을 구분할 수 없다"를 들었는데,
+    최신 레벨 하나만으로는 그 계산 자체가 불가능하다(과거 값이 없다) —
+    history 를 같이 실어 이 모듈이 아니라 이걸 쓰는 쪽(Task 12)이 임의의
+    보유기간에 대해 계산할 수 있게 한다. 크기는 250일 × 지수 2개 ≈ 5KB —
+    1MB 상한에 비하면 무시할 만하다.
+
+    반환값은 (values, history, failed) 세 개:
+    - values: {"KOSPI": 최신 레벨, ...} — 기존과 동일, 화면 요약 박스용
+    - history: {"KOSPI": {"2026-08-19": 6471.17, ...}, ...} — YYYY-MM-DD 키
+    - failed: 실패한 지수 이름 리스트 — 로그로만 남기면 §8 이 무색해진다
+      ("로그는 아무도 안 본다" — 화면이 말하게 한다)
     """
-    out = {}
+    values: dict = {}
+    history: dict = {}
+    failed: list = []
     for name, sym in INDEX.items():
         try:
-            bars = naver.fetch_bars(sym, n=2)
-            out[name] = bars[max(bars)]["close"]
+            bars = naver.fetch_bars(sym, n=250)
+            values[name] = bars[max(bars)]["close"]
+            history[name] = {_iso_day(d): b["close"] for d, b in bars.items()}
         except Exception as e:      # 지수는 있으면 좋은 것 — 없다고 멈추지 않는다
             print(f"[경고] 지수 {name} 실패: {type(e).__name__}: {e}")
-    return out
+            failed.append(name)
+    return values, history, failed
 
 
 def main() -> int:
+    bad: list = []
     try:
         state, _ = gh.read_json(POSITIONS, default=models.empty_state())
-        bad = []
-        state = models.normalize(state, bad)
     except Exception as e:
-        # 원래는 models.RejectedError(모르는 schema)만 잡았다. 그러면
-        # gh.read_json 자신이 내는 예외 — positions.json 은 IRREPLACEABLE
-        # 이라 손상 시 strict 여부와 무관하게 gh.CorruptJSON, 그 외
-        # 1MB 초과·API 오류의 RuntimeError, 네트워크 문제의 URLError —
-        # 는 여기서 못 잡혀 main() 밖으로 그대로 새어나가 트레이스백으로
-        # 죽는다. 이 모듈이 지향하는 "넓게 잡고 커밋하지 않는다"는 원칙과
-        # 어긋나므로 넓혔다.
-        print(f"[중단] positions 를 읽을 수 없다: {type(e).__name__}: {e}")
+        # positions.json 은 IRREPLACEABLE 이라 손상 시 strict 여부와 무관하게
+        # gh.CorruptJSON, 그 외 1MB 초과·API 오류의 RuntimeError, 네트워크
+        # 문제의 URLError 까지 — 이 조회 하나에서 나올 수 있는 실패 종류가
+        # 넓다. 이 블록은 그래서 넓게 잡는다. (원래는 이 호출이 아래
+        # normalize() 와 한 try 에 묶여 models.RejectedError 만 잡았다 —
+        # 그러면 여기서 나는 예외들은 전혀 못 잡혀 main() 밖으로 그대로
+        # 새어나가 트레이스백으로 죽었다.)
+        print(f"[중단] positions.json 조회 실패: {type(e).__name__}: {e}")
+        return 1
+    try:
+        state = models.normalize(state, bad)
+    except models.RejectedError as e:
+        # normalize() 가 실제로 던지는 건 이거 하나뿐이다(모르는 schema).
+        # 위 조회 블록과 일부러 분리해서 여기는 좁게 잡는다 — 한 블록에
+        # 몰아 넓게 잡으면, normalize() 자신의 버그(예상 못 한 TypeError
+        # 등)까지 "positions 를 읽을 수 없다"로 뭉개져서 코드 버그가 코드
+        # 버그로 드러나지 않는다.
+        print(f"[중단] positions.json 스키마를 알 수 없다: {e}")
         return 1
     if bad:
         # **여기서는 멈추지 않는다.** quotes.json 은 언제든 다시 만들 수 있고,
         # 멈추면 화면만 낡는다. 대신 개수를 스냅샷에 실어 화면이 말하게 한다.
-        print(f"[경고] 해석 불가 항목 {len(bad)}건 — 이 종목들은 시세를 붙이지 않는다")
+        #
+        # 단, bad 가 최상위 구조 손상의 합성 마커 하나("(파일 전체)")인
+        # 경우는 "해석 불가 항목 1건"이라고 찍으면 안 된다 — 그건 보유
+        # 10건짜리 파일이 통째로 안 읽혀 전부 사라진 사고를 "기록 1건을
+        # 못 읽었다"로 축소 보고하는 것이다(정규화된 state 는 이미
+        # empty_state() 라 이 실행에서 보유가 전부 안 보인다).
+        if len(bad) == 1 and bad[0].get("id") == WHOLE_FILE_MARKER:
+            note = bad[0].get("note", "")
+            print(f"[경고] positions.json 최상위 구조를 읽지 못했다 — 보유 전체가 가려짐: {note}")
+        else:
+            print(f"[경고] 해석 불가 항목 {len(bad)}건 — 이 종목들은 시세를 붙이지 않는다")
     codes = open_codes(state)
     try:
         got = naver.fetch_quotes(codes)
@@ -138,10 +211,15 @@ def main() -> int:
     except Exception as e:
         print(f"[중단] 달력 실패: {type(e).__name__}: {e}")
         return 1
-    snap = build(got, codes, days, fetch_benchmark(), now_kst(),
-                 is_final=False, dropped=len(bad))
+    bench, bench_history, bench_failed = fetch_benchmark()
+    snap = build(got, codes, days, bench, now_kst(),
+                 is_final=False, dropped=len(bad),
+                 bench_history=bench_history, benchmark_failed=bench_failed)
     if not should_commit(snap):
-        print(f"[중단] 전부 실패 ({snap['fail_count']}건) — 직전 값 유지")
+        if snap["ok_count"] + snap["fail_count"] == 0:
+            print(f"[중단] 보유가 전부 격리됨(positions_dropped={snap['positions_dropped']}) — 직전 값 유지")
+        else:
+            print(f"[중단] 전부 실패 ({snap['fail_count']}건) — 직전 값 유지")
         return 1
     try:
         _, sha = gh.read_json(QUOTES)

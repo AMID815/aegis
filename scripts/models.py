@@ -53,7 +53,7 @@ def _date(v):
     return v
 
 
-def _text(v, n, default="", strict=False):
+def _text(v, n, *, default="", strict=False):
     """문자열 필드 하나를 검증한다. strict 면 n자 초과를 자르지 않고 거부한다."""
     if v is None or v == "":
         return default
@@ -98,8 +98,26 @@ def normalize(raw, dropped=None) -> dict:
             continue
         try:
             _date(buys[0].get("date"))
-            _price(buys[0].get("price"))
+            price_v = buys[0].get("price")
+            if _price(price_v) != price_v:   # 저장값은 반올림해도 그대로여야 한다 — 소수는 손으로 고친 흔적
+                raise RejectedError(f"저장된 가격이 정수가 아님: {price_v!r}")
         except RejectedError:
+            if dropped is not None:
+                dropped.append(p)
+            continue
+        # status 는 setdefault 이전, 원본 그대로 검사한다. dropped 페이로드에 id 등
+        # 합성된 키가 섞여 들어가면 "파일에 있던 것"이라는 보고 취지가 깨진다.
+        if p.get("status", OPEN) not in (OPEN, CLOSED):   # 거래정지/상장폐지는 시세 쪽 파생 상태이지 여기 값이 아니다
+            if dropped is not None:
+                dropped.append(p)
+            continue
+        exits = p.get("exits", [])
+        if not isinstance(exits, list):   # buys 와 같은 이유: 있는데 리스트가 아니면 격리
+            if dropped is not None:
+                dropped.append(p)
+            continue
+        adjustments = p.get("adjustments", [])
+        if not isinstance(adjustments, list):   # 아직 아무도 참조하지 않지만 exits 와 대칭으로 검증한다
             if dropped is not None:
                 dropped.append(p)
             continue
@@ -109,10 +127,6 @@ def normalize(raw, dropped=None) -> dict:
         p.setdefault("exits", [])
         p.setdefault("adjustments", [])
         p.setdefault("status", OPEN)
-        if p["status"] not in (OPEN, CLOSED):   # 거래정지/상장폐지는 시세 쪽 파생 상태이지 여기 값이 아니다
-            if dropped is not None:
-                dropped.append(p)
-            continue
         p.setdefault("source", "수동")
         p.setdefault("memo", "")
         good.append(p)

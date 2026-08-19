@@ -217,3 +217,58 @@ def test_존재하지_않는_날짜는_거부한다():
     with pytest.raises(models.RejectedError):
         models.apply_buy(models.empty_state(), {
             "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-02-30"})
+
+
+# ── 재검토(R1·R3·R4)에서 지적된 결함을 고정하는 테스트다 ──────────────────
+
+
+@pytest.mark.parametrize("bad_exits", ["망가짐", {"a": 1}])
+def test_exits가_리스트가_아니면_격리되고_매도해도_AttributeError가_아니다(bad_exits):
+    raw = {"schema": 1, "positions": [
+        {"code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-08-19", "price": 100000}], "exits": bad_exits},
+    ]}
+    d = models.normalize(raw)
+    assert d["positions"] == []
+    with pytest.raises(models.RejectedError):
+        models.apply_sell(d, {"code": "005930", "price": 100, "date": "2026-08-20"})
+
+
+def test_adjustments가_리스트가_아니면_격리한다():
+    # exits 와 대칭으로 검증하기로 한 선택을 고정한다(강제되진 않지만 일관성을 위해).
+    raw = {"schema": 1, "positions": [
+        {"code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-08-19", "price": 100000}], "adjustments": "망가짐"},
+    ]}
+    assert models.normalize(raw)["positions"] == []
+
+
+def test_dropped_페이로드는_합성된_키를_담지_않는다():
+    original = {"code": "005930", "name": "n",
+                "buys": [{"date": "2026-08-01", "price": 100000}], "status": "halted"}
+    raw = {"schema": 1, "positions": [dict(original)]}
+    dropped = []
+    out = models.normalize(raw, dropped)
+    assert out["positions"] == []
+    assert len(dropped) == 1
+    # id/signal_date/exits/adjustments 등 setdefault 로 합성되는 키가 섞여 들어가면 안 된다
+    assert dropped[0] == original
+
+
+@pytest.mark.parametrize("good_price", [100, 100.0])
+def test_저장된_가격이_반올림해도_그대로면_통과한다(good_price):
+    raw = {"schema": 1, "positions": [
+        {"code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-08-19", "price": good_price}]},
+    ]}
+    out = models.normalize(raw)
+    assert len(out["positions"]) == 1
+    assert out["positions"][0]["buys"][0]["price"] == good_price
+
+
+def test_저장된_가격이_소수면_격리한다():
+    raw = {"schema": 1, "positions": [
+        {"code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-08-19", "price": 100.4}]},
+    ]}
+    assert models.normalize(raw)["positions"] == []

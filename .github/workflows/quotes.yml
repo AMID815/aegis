@@ -1,0 +1,32 @@
+name: quotes
+# 장중 30분 갱신. KST 09:00~15:30 = UTC 00:00~06:30.
+# cron 은 UTC 기준이고 이 창은 하루 안에서 닫히므로 요일 필터(1-5)가 KST 평일과 일치한다.
+#
+# 수능일(마감 16:30)에는 15:30 이후 갱신이 멈춘다 — 그날 하루만 한 시간 낡는다.
+# close 워크플로가 17:00 에 일봉으로 확정하므로 데이터는 정확해진다.
+
+on:
+  schedule:
+    - cron: "0,30 0-6 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write        # 2023-02 이후 기본이 read — 없으면 첫 커밋부터 403
+
+concurrency:
+  group: data-write      # close 와 공유. 둘 다 quotes.json 을 쓴다
+  cancel-in-progress: false
+
+jobs:
+  quotes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m scripts.quotes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

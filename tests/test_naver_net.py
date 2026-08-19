@@ -113,14 +113,15 @@ def test_fetch_market_sum은_sosok_page를_그대로_전달하고_EUCKR로_부�
     def 가짜(url, enc="utf-8"):
         captured["url"] = url
         captured["enc"] = enc
-        return '<a href="/item/main.naver?code=005930" class="tltle">삼성전자</a>'
+        return ('<a href="/item/main.naver?code=005930" class="tltle">삼성전자</a></td>'
+                 '<td class="number">247,500</td>')
 
     monkeypatch.setattr(naver, "_fetch", 가짜)
     items = naver.fetch_market_sum(sosok=1, page=3)
     assert "sosok=1" in captured["url"]
     assert "page=3" in captured["url"]
     assert captured["enc"] == naver.EUCKR
-    assert items == {"005930": "삼성전자"}
+    assert items == {"005930": {"name": "삼성전자", "price": 247500}}
 
 
 def test_fetch_etf는_ETF_URL을_EUCKR로_부른다(monkeypatch):

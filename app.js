@@ -101,16 +101,40 @@
 //     로 표시하고(rows), ret 를 null 로 둬 done 에서 자동으로 빠진다
 //     (renderSummary 가 이미 하던 필터를 그대로 탄다).
 //
+// 3라운드(master.json 매입가 참조 과제) 반영:
+//
+// 18. ±30% 오타 가드가 신규 매수(quotes.quotes 에 없는 코드)엔 구조적으로
+//     못 걸리던 걸 고쳤다 — master.json 의 items 가 [코드, 이름] 에서
+//     [코드, 이름, 가격] 으로 늘었다(master.py: naver.parse_market_sum 이
+//     시가총액 페이지에서 이미 훑던 표의 현재가 컬럼을 추가 요청 없이
+//     실었다, 2026-08-20 실측 4,299종목 전수 확인). referencePrice(code)
+//     가 quotes.quotes 를 먼저 보고 없으면 MASTER_PRICES(master.json 에서
+//     뽑은 코드→가격 Map)로 폴백한다 — 매도(항상 quotes 에 있다)와 신규
+//     매수(quotes 에 없다) 양쪽에 같은 함수 하나를 쓴다. 두 참조 모두
+//     없으면(코드가 아직 master 에도 없거나, 가격을 못 읽어 null이거나,
+//     master.json 로드 자체가 실패했으면) 조용히 가드를 건너뛴다 — 기존
+//     "q 가 undefined 면 그냥 안 묻는다" 패턴을 그대로 확장한 것이다.
+//     master.json 로드 실패는 이미 이전부터 별도 배지로 알리고 있었는데
+//     (masterLoadFailed), 이제 그 실패가 매입 가드에도 영향을 준다는
+//     문구를 덧붙였다 — 파일 전체가 없다는 "구조적" 실패는 계속
+//     소리내어 알리고, 종목 하나에 참고가가 없는 "개별" 경우는 계속
+//     조용히 넘어간다(항목 8 이 positions.json 에서 쓰는 것과 같은
+//     구분 — 구조 손상은 크게, 개별 누락은 조용히).
+//     [코드, 이름] 만 읽던 기존 JS(배열 구조분해·`new Map(MASTER)`)는
+//     세 번째 요소가 늘어도 그대로 동작한다 — 실브라우저로 확인함(커밋
+//     메시지 참조). ±30% 라는 문턱 값 자체는 그대로 뒀다 — master.json
+//     참조가 quotes.json 보다 며칠 더 오래됐을 수 있어도, 상한가가 이미
+//     같은 크기(±30%)라 문턱을 넓히면 진짜 오타를 더 자주 놓치고,
+//     좁히면 정상적인 상한가 매수마다 헛되이 되묻는다 — 확인창 한 번의
+//     비용과 오타 하나가 종목 실현손익을 -90%로 오염시키는 비용(§11)은
+//     대칭이 아니라서, 기존 값을 재검토할 근거를 찾지 못했다.
+//
 // 검토했지만 바꾸지 않은 것(각 지점 주석에 근거):
 // fillCandidates 의 앞/중간 분리(실제 4,299종목 데이터로 정확성·성능
 // 확인 — 1ms 미만, 대소문자 처리만 항목 16 에서 추가), resolveCode 의
 // 이름 완전일치 폴백(실측 데이터 중복 이름 0건), renderSummary 의
 // 승률/평균수익률 대 평균보유 분모 차이(의도된 동작 — 계산 가능 조건
-// 자체가 다르다), ±30% 오타 가드가 신규 매수엔 구조적으로 못 걸리는 것
-// (quotes.quotes 자체가 보유 중 종목만 담고 있어 페이지가 대안 시세를
-// 구할 방법이 없다 — master.json 에 시가총액 페이지의 현재가 컬럼을
-// 얹는 별도 과제가 이걸 추가 요청 없이 풀 수 있다고 확인됨, 그쪽에서
-// 처리 예정이라 여기서는 손대지 않았다).
+// 자체가 다르다).
 
 const RAW = "https://raw.githubusercontent.com/AMID815/mouigosa/data/";
 const REPO = "https://github.com/AMID815/mouigosa";
@@ -536,6 +560,7 @@ function renderStale(quotes, flags) {
 // ── Task 13: 입력 폼 → 이슈 URL ─────────────────────────────────────────
 
 let MASTER = [], NAMES = new Map(), STATE = { positions: [] }, QUOTES = {};
+let MASTER_PRICES = new Map();   // 코드 → 가격(있으면 int, 없으면 null) — 항목 18
 let masterLoadFailed = false;    // 제출 시 안내 문구를 바꾸는 데만 쓴다
 
 function fillCandidates(q) {
@@ -600,6 +625,26 @@ function findOpenPosition(code) {
   //     새 값으로 덮인다(위 hasExitRecorded 옆 주석).
   return STATE.positions.find(p => p.code === code && p.status === "open"
                                     && isReadablePosition(p) && !hasExitRecorded(p));
+}
+
+// 오타 가드(onSubmit)의 참고가 — 항목 18. quotes.quotes 는 "지금 보유
+// 중(open)"인 종목만 담는다(quotes.py open_codes 가 status==open 인
+// 코드만 조회한다). 매도는 이 종목이 이미 open 이었어야 하므로 대부분
+// q 가 있어 그 값을 그대로 쓴다. 신규 매수(아직 한 번도 안 산 종목)는
+// 이 코드가 quotes.quotes 에 애초에 없다 — master.json 의 시가총액
+// 현재가 컬럼(naver.parse_market_sum, master.py 가 매일 갱신)으로
+// 폴백한다. 둘 다 없으면(코드가 master 에도 없거나, 가격을 못 읽어
+// null이거나, master.json 로드 자체가 실패해 MASTER_PRICES 가 비어
+// 있으면) null 을 돌려준다 — 호출자가 그 경우 가드를 조용히 건너뛴다.
+// 개별 종목 하나에 참고가가 없는 흔한 경우(신규상장 등)마다 확인창을
+// 띄우면, 정말 오타를 잡아야 할 때 사용자가 반사적으로 넘기게 된다 —
+// master.json 로드 자체가 실패한 "구조적" 경우는 이미 별도 배지로
+// 알린다(masterLoadFailed, main() 참조).
+function referencePrice(code) {
+  const q = (QUOTES.quotes || {})[code];
+  if (q) return q.price;
+  const m = MASTER_PRICES.get(code);
+  return (m === undefined || m === null) ? null : m;
 }
 
 // #price 는 type=number 가 아니라 text+inputmode=numeric 이다(Task 11
@@ -669,23 +714,12 @@ function onSubmit(ev) {
 
   const open = findOpenPosition(code);
 
-  // 오타 방지: 직전 종가 대비 ±30% 를 벗어나면 되묻는다.
-  //
-  // quotes.quotes 는 "지금 보유 중(open)"인 종목만 담는다(quotes.py
-  // open_codes 가 status==open 인 코드만 조회한다). 매도는 이 종목이
-  // 이미 open 이었어야 하므로 q 가 항상 존재해 가드가 반드시 걸린다.
-  // 반대로 신규 매수(아직 한 번도 안 산 종목)는 이 코드가 quotes.quotes
-  // 에 애초에 없으므로 q 가 undefined 라 가드가 구조적으로 통과한다 —
-  // 페이지가 CORS 로 네이버를 직접 못 불러서(설계 §6-2) 보유 중이 아닌
-  // 임의 종목의 참고가를 별도로 구할 방법이 없기 때문이다. 이건 이
-  // 파일만으로는 못 고친다 — master.py 가 이미 매일 훑는 시가총액
-  // 87페이지에 현재가 컬럼이 있어(parse_market_sum 이 이미 정규식으로
-  // 잡는 표 안) 추가 요청 없이 master.json 에 실을 수 있다는 게 확인돼
-  // 있고, 그 작업은 별도 과제로 진행 중이다 — 여기서는 그 데이터가
-  // 없다는 전제로 그대로 둔다.
-  const q = (QUOTES.quotes || {})[code];
-  if (q && Math.abs(pct(q.price, price)) > 30) {
-    if (!confirm("최근 종가 " + fmt(q.price) + "원과 " + Math.round(Math.abs(pct(q.price, price)))
+  // 오타 방지: 참고가(referencePrice — quotes 우선, 없으면 master.json
+  // 현재가로 폴백, 항목 18) 대비 ±30% 를 벗어나면 되묻는다. 참고가가
+  // 아예 없으면(null) 조용히 넘어간다 — referencePrice 옆 주석 참조.
+  const ref = referencePrice(code);
+  if (ref !== null && Math.abs(pct(ref, price)) > 30) {
+    if (!confirm("최근 종가 " + fmt(ref) + "원과 " + Math.round(Math.abs(pct(ref, price)))
                  + "% 차이입니다. 그대로 진행할까요?")) return;
   }
 
@@ -766,14 +800,19 @@ document.getElementById("form").addEventListener("submit", onSubmit);
   const msRes = await load("master.json", { items: [] },
                             { buster: kstToday, cacheMode: "default" });
   MASTER = Array.isArray(msRes.data.items) ? msRes.data.items : [];
-  NAMES = new Map(MASTER);
+  NAMES = new Map(MASTER);                  // [code,name,price] 라도 앞 2개만 쓴다(Map 생성자 규칙)
+  // 코드 → 가격. 항목이 예전 [code,name] 2요소짜리로 캐시돼 있어도(배포
+  // 직후 브라우저 HTTP 캐시가 어제 날짜 버스터로 아직 옛 파일을 들고
+  // 있는 과도기) t[2] 가 undefined 라 null 로 정규화한다 — 가드가
+  // "가격을 모른다"로 안전하게 해석하게(항목 18).
+  MASTER_PRICES = new Map(MASTER.map(t => [t[0], t[2] === undefined ? null : t[2]]));
   masterLoadFailed = !msRes.ok;
   if (masterLoadFailed) {
     // 실패해도 화면 어디에도 안 보이던 유일한 실패 지점이었다 — 표는
     // 그려지고 배지도 안 뜨고 자동완성은 그냥 조용히 빈 채로 남아,
     // 사용자가 폼을 다 채우고 제출을 눌러야 비로소(alert 로) 알게 됐다.
-    addStaleMessage("종목 목록(master.json)을 불러오지 못했습니다 — 자동완성과 "
-      + "매도 판정이 동작하지 않습니다. 새로고침해주세요.");
+    addStaleMessage("종목 목록(master.json)을 불러오지 못했습니다 — 자동완성·매도 "
+      + "판정·신규 매수 오타 확인이 동작하지 않습니다. 새로고침해주세요.");
   }
   // 표가 그려지는 동안 사용자가 이미 입력을 시작했을 수 있으니, 마스터가
   // 늦게 도착하면 지금 값 기준으로 자동완성·모드를 한 번 더 채운다.

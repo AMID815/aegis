@@ -75,6 +75,12 @@ _ITEM_RE = re.compile(r'<item\s+data="([^"]+)"')
 # 않아서 아무도 못 알아챈다.
 _SUM_RE = re.compile(r'<a href="/item/main\.naver\?code=([0-9A-Z]{6})"[^>]*>([^<]+)</a>')
 
+# 현재가 컬럼. parse_market_sum 이 이 정규식을 종목 링크 뒤부터 **다음 종목
+# 링크 앞까지로 범위를 잘라서**만 검색한다(아래 parse_market_sum docstring
+# 참조) — 이 정규식 자체는 "이번 행 안에서 처음 만나는 숫자 셀"만 잡으면
+# 되고, 옆 행과 안 섞이게 막는 책임은 호출자(검색 범위를 자르는 쪽)에 있다.
+_PRICE_RE = re.compile(r'<td class="number">([\d,\-]*)</td>')
+
 _REPLACEMENT = "�"   # 잘못된 디코드가 한글 자리에 남기는 흔적
 
 # ETF 목록은 페이징이 없다 — 한 번에 전체를 돌려준다(2026-08-19 실측 1,162건).
@@ -213,7 +219,11 @@ def trading_days(body: str) -> list:
 
 
 def parse_market_sum(html: str) -> dict:
-    """시가총액 페이지의 종목 링크(class="tltle")에서 코드·이름을 뽑는다.
+    """시가총액 페이지의 종목 링크(class="tltle")에서 코드·이름·현재가를 뽑는다.
+
+    반환값: `{코드: {"name": 이름, "price": 가격 또는 None}}`. parse_polling
+    이 이미 쓰는 "코드 → 필드 dict" 모양을 그대로 따른다 — 나중에 필드가
+    더 늘어도 위치 기반 튜플 언패킹이 깨지지 않는다.
 
     2026-08-19 실측(코스피 1페이지, 50행)으로 정규식이 표(우선주·영숫자
     코드 포함)만 정확히 잡고 내비게이션 등 다른 code= 링크는 섞이지 않음을
@@ -227,11 +237,54 @@ def parse_market_sum(html: str) -> dict:
     "0건이면 실패" 규칙만으로 충분히 걸린다. 대신 디코드 손상(이름이
     치환문자로 깨짐)은 행 수와 무관하게 잡는다 — 그게 이 페이지에서 실제로
     일어난 사고(위 모듈 docstring)다.
+
+    가격 컬럼 (2026-08-20 실측 — app.js 매입가 오타 가드가 신규 매수에도
+    걸리게 하는 과제)
+    ------------------------------------------------------------------
+    종목 링크 바로 다음의 첫 `<td class="number">` 가 현재가다. 코스피·
+    코스닥 **전체**(4,299종목, 89페이지)를 훑어 전수 확인했다 — 값은
+    전부 콤마 포함 순수 숫자였고 빈 문자열·"-" 는 0건이었다. 실측 당시
+    polling 상 tradableStatus=halt 였던 두 종목(000880·183300)도 이
+    표에서는 마지막 체결가가 숫자로 그대로 나왔다 — polling 의
+    integratedPriceInfo 필드에서만 보이는 "-" 자리표시자(parse_polling
+    docstring 참조)는 이 표에서는 관측되지 않았다. ETF(예: 069500 KODEX
+    200)도 같은 컬럼 위치에서 polling 값과 정확히 일치했다.
+
+    그래도 방어적으로 파싱한다 — 신규상장 당일 등 미관측 상황을 포함해
+    이 컬럼에서 무언가 못 읽으면(셀이 없거나 "-"거나 콤마만 있거나)
+    **price 를 None 으로 둔다, 0 이나 추정값으로 채우지 않는다**(설계
+    "클램프 금지" 원칙 — app.js 가 그 종목만 가드 없이 넘어가게 한다).
+    이름은 여전히 살린다 — 가격 하나 못 읽었다고 자동완성에서 그 종목
+    자체를 빼버리면 원래 문제(신규 매수는 참고가가 없다)가 그대로 남는다.
+
+    같은 정규식(`_SUM_RE`)으로 먼저 코드·이름 위치를 전부 찾고, 각 매치의
+    끝부터 **다음 매치가 시작하는 자리(또는 문서 끝)까지만** `_PRICE_RE`
+    로 검색한다. 이름 뒤에서 시작해 다음 `<td class="number">` 까지
+    통째로 `.*?` 로 훑는 정규식 한 방으로 처리하면, 이번 행에 가격 셀이
+    없는 마크업 변화가 생겼을 때 그 `.*?` 가 그대로 다음 행의 가격 셀까지
+    건너뛰어 **엉뚱한 종목의 가격을 이 종목 것으로 잘못 묶을 수 있다** —
+    이 파일이 가장 경계하는 부류의 사고(조용히 틀린 값이 섞이는 것, 위
+    0126Z0 사례)를 오타 가드 구현 자체에서 새로 만들 순 없다. 검색
+    범위를 다음 종목 링크 앞까지로 자르면, 이번 행에 가격 셀이 없을 때
+    그냥 못 찾을 뿐(price=None)이고 옆 행 값을 잘못 가져오는 경우가
+    구조적으로 없다.
     """
-    items = {c: n.strip() for c, n in _SUM_RE.findall(html)}
-    if not items:
+    matches = list(_SUM_RE.finditer(html))
+    if not matches:
         raise EmptyParseError("시가총액 페이지 0건")
-    if _corrupted(items.values()):
+    items = {}
+    for i, m in enumerate(matches):
+        code, name = m.group(1), m.group(2).strip()
+        window_end = matches[i + 1].start() if i + 1 < len(matches) else len(html)
+        price_m = _PRICE_RE.search(html, m.end(), window_end)
+        price = None
+        if price_m:
+            try:
+                price = _num(price_m.group(1))
+            except ValueError:
+                price = None      # "-"·빈 문자열 등 — 클램프하지 않고 None 으로 둔다
+        items[code] = {"name": name, "price": price}
+    if _corrupted(v["name"] for v in items.values()):
         raise EmptyParseError("시가총액 페이지 이름이 깨졌다 — 인코딩 오류로 판단")
     return items
 

@@ -22,10 +22,15 @@ FCHART = """<?xml version="1.0" encoding="EUC-KR" ?>
 <item data="20260819|251500|254500|246500|247500|22683374" />
 </chartdata></protocol>"""
 
+# 실제 페이지 구조(2026-08-20 실측)를 그대로 흉내낸다 — 종목 링크 바로
+# 다음이 순위/전일비 등이 아니라 곧장 현재가 <td class="number"> 다.
 MARKET_SUM = """
-<a href="/item/main.naver?code=005930" class="tltle">삼성전자</a>
-<a href="/item/main.naver?code=005935" class="tltle">삼성전자우</a>
-<a href="/item/main.naver?code=000660" class="tltle">SK하이닉스</a>
+<a href="/item/main.naver?code=005930" class="tltle">삼성전자</a></td>
+<td class="number">247,500</td>
+<a href="/item/main.naver?code=005935" class="tltle">삼성전자우</a></td>
+<td class="number">173,700</td>
+<a href="/item/main.naver?code=000660" class="tltle">SK하이닉스</a></td>
+<td class="number">1,500,000</td>
 """
 
 def _etf_body(pairs):
@@ -87,7 +92,11 @@ def test_지수_일봉도_소수점을_읽는다():
 
 def test_시가총액_페이지에서_우선주까지_뽑는다():
     items = naver.parse_market_sum(MARKET_SUM)
-    assert items == {"005930": "삼성전자", "005935": "삼성전자우", "000660": "SK하이닉스"}
+    assert items == {
+        "005930": {"name": "삼성전자", "price": 247500},
+        "005935": {"name": "삼성전자우", "price": 173700},
+        "000660": {"name": "SK하이닉스", "price": 1500000},
+    }
 
 
 def test_ETF_목록을_뽑는다():
@@ -182,7 +191,11 @@ def test_시가총액_페이지에서_영숫자_코드도_뽑는다():
     html = MARKET_SUM + (
         '\n<a href="/item/main.naver?code=0126Z0" class="tltle">삼성에피스홀딩스</a>\n')
     items = naver.parse_market_sum(html)
-    assert items["0126Z0"] == "삼성에피스홀딩스"
+    assert items["0126Z0"]["name"] == "삼성에피스홀딩스"
+    # 마지막 행이라 뒤에 가격 셀이 없다 — None 이어야 하고, 위 SK하이닉스
+    # 행의 1,500,000 을 잘못 물려받으면 안 된다(옆 행 오염 방지, 아래
+    # test_가격_셀이_없는_행은_옆_행_가격을_빌려오지_않는다 와 같은 계열).
+    assert items["0126Z0"]["price"] is None
 
 
 def test_ETF_목록도_영숫자_코드를_받는다():
@@ -308,3 +321,52 @@ def test_정지종목_일봉은_0값이_그대로_넘어온다():
     bars = naver.parse_fchart(xml)
     assert bars["20260819"] == {
         "open": 0, "high": 0, "low": 0, "close": 83800, "volume": 0}
+
+
+# ── master.json 매입가 참조 과제: parse_market_sum 이 가격도 뽑는다 ──────
+#
+# 2026-08-20 실측: 코스피·코스닥 전체(4,299종목, 89페이지)를 훑어 가격
+# 컬럼이 전부 콤마 포함 순수 숫자임을 확인했다(빈 문자열·"-" 0건, 거래정지
+# 종목 000880·183300 포함). 그래도 파서는 방어적으로 짠다 — 아래 테스트들이
+# 그 방어선(옆 행 오염 방지, "-"·빈 셀 → None, 클램프 금지)을 고정한다.
+
+def test_가격_셀이_없는_행은_옆_행_가격을_빌려오지_않는다():
+    """이번 행에 가격 셀이 통째로 없으면(마크업 변화를 가정) None 이어야
+    한다 — 검색 범위를 다음 종목 링크 앞까지로 자르지 않고 `.*?` 로 통째로
+    훑으면, 이 종목 이름 뒤에서 시작해 그 *다음* 종목의 가격 셀까지 건너뛰어
+    엉뚱하게 묶일 수 있다. 그게 실제로 벌어지지 않는다는 걸 직접 확인한다."""
+    html = (
+        '<a href="/item/main.naver?code=000001" class="tltle">가격없음</a>\n'
+        '<a href="/item/main.naver?code=000002" class="tltle">다음종목</a></td>\n'
+        '<td class="number">999,999</td>\n'
+    )
+    items = naver.parse_market_sum(html)
+    assert items["000001"] == {"name": "가격없음", "price": None}
+    assert items["000002"] == {"name": "다음종목", "price": 999999}
+
+
+def test_가격_셀이_대시면_None으로_둔다():
+    """polling 의 integratedPriceInfo 에서 실측된 "-" 자리표시자를 이
+    컬럼에서는 실측하지 못했지만, 정규식(`[\\d,\\-]*`)이 애초에 "-" 를
+    허용하므로 방어적으로 처리한다 — 0 이나 다른 값으로 채우지 않는다
+    (클램프 금지)."""
+    html = ('<a href="/item/main.naver?code=000001" class="tltle">정지종목</a></td>\n'
+            '<td class="number">-</td>\n')
+    items = naver.parse_market_sum(html)
+    assert items["000001"] == {"name": "정지종목", "price": None}
+
+
+def test_가격_셀이_빈문자열이면_None으로_둔다():
+    html = ('<a href="/item/main.naver?code=000001" class="tltle">빈셀</a></td>\n'
+            '<td class="number"></td>\n')
+    items = naver.parse_market_sum(html)
+    assert items["000001"] == {"name": "빈셀", "price": None}
+
+
+def test_이름이_깨져도_가격_None인_행이_섞여있으면_전체가_실패로_본다():
+    """_corrupted 검사가 새 dict 모양({"name":..,"price":..})에서도 여전히
+    이름만 보고 판정하는지 확인한다 — price 필드가 검사를 가리면 안 된다."""
+    html = ('<a href="/item/main.naver?code=000001" class="tltle">' + naver._REPLACEMENT
+            + '</a></td>\n<td class="number">-</td>\n')
+    with pytest.raises(naver.EmptyParseError):
+        naver.parse_market_sum(html)

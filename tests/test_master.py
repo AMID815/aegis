@@ -68,68 +68,92 @@ import pytest
 from scripts import master
 
 
+# naver.fetch_market_sum 이 실제로 돌려주는 모양은
+# {코드: {"name": 이름, "price": 가격 또는 None}} 이다(naver.py 참조,
+# master.json 매입가 참조 과제). 대부분의 테스트는 가격 자체를 검증하는
+# 게 아니라 코드/이름 흐름만 확인하므로, 이 헬퍼로 짧게 쓴다 — 값이
+# 튜플(이름, 가격)이면 그 가격을 쓰고, 그냥 문자열(이름)이면 price=None.
+def _sum(pairs):
+    out = {}
+    for code, v in pairs.items():
+        name, price = v if isinstance(v, tuple) else (v, None)
+        out[code] = {"name": name, "price": price}
+    return out
+
+
 # ---------------------------------------------------------------------------
-# 공급된 테스트 (그대로)
+# 공급된 테스트 (그대로 — 단, 가격 필드 추가로 fixture 모양만 바뀜)
 # ---------------------------------------------------------------------------
 
 def test_새_종목이_없을때까지_페이지를_넘긴다(monkeypatch):
     페이지 = {
-        (0, 1): {"005930": "삼성전자"},
-        (0, 2): {"000660": "SK하이닉스"},
-        (0, 3): {"000660": "SK하이닉스"},     # 새 게 없다 → 멈춘다
+        (0, 1): _sum({"005930": "삼성전자"}),
+        (0, 2): _sum({"000660": "SK하이닉스"}),
+        (0, 3): _sum({"000660": "SK하이닉스"}),     # 새 게 없다 → 멈춘다
     }
     monkeypatch.setattr(master.naver, "fetch_market_sum",
                         lambda sosok, page: 페이지.get((sosok, page), {}))
     out = master.crawl(sosok=0, max_pages=10)
-    assert out == [("005930", "삼성전자"), ("000660", "SK하이닉스")]
+    assert out == [("005930", "삼성전자", None), ("000660", "SK하이닉스", None)]
 
 
 def test_페이지_순서가_보존된다(monkeypatch):
     """순서가 곧 관련도다 — 시가총액 큰 회사가 앞에 와야 자동완성이 쓸모 있다."""
-    페이지 = {(0, 1): {"005930": "삼성전자", "000660": "SK하이닉스"},
-              (0, 2): {"247540": "에코프로비엠"}}
+    페이지 = {(0, 1): _sum({"005930": "삼성전자", "000660": "SK하이닉스"}),
+              (0, 2): _sum({"247540": "에코프로비엠"})}
     monkeypatch.setattr(master.naver, "fetch_market_sum",
                         lambda sosok, page: 페이지.get((sosok, page), {}))
     out = master.crawl(sosok=0, max_pages=10)
-    assert [c for c, _ in out] == ["005930", "000660", "247540"]
+    assert [c for c, *_ in out] == ["005930", "000660", "247540"]
+
+
+def test_crawl은_가격을_그대로_옮긴다(monkeypatch):
+    """crawl() 은 naver.fetch_market_sum 이 뽑아온 가격을 판단하지 않고
+    그대로 옮기기만 한다 — 실제 값(None 이 아닌 int)이 살아남는지 확인."""
+    monkeypatch.setattr(master.naver, "fetch_market_sum", lambda sosok, page:
+                        _sum({"005930": ("삼성전자", 247500),
+                              "000660": ("SK하이닉스", 1500000)}) if page == 1 else {})
+    out = master.crawl(sosok=0, max_pages=5)
+    assert out == [("005930", "삼성전자", 247500), ("000660", "SK하이닉스", 1500000)]
 
 
 def test_페이지가_비면_멈춘다(monkeypatch):
     def 가짜(sosok, page):
         if page == 1:
-            return {"005930": "삼성전자"}
+            return _sum({"005930": "삼성전자"})
         raise master.naver.EmptyParseError("끝")
     monkeypatch.setattr(master.naver, "fetch_market_sum", 가짜)
-    assert master.crawl(sosok=0, max_pages=10) == [("005930", "삼성전자")]
+    assert master.crawl(sosok=0, max_pages=10) == [("005930", "삼성전자", None)]
 
 
 def test_코스피_코스닥_ETF를_이_순서로_합친다(monkeypatch):
     monkeypatch.setattr(master, "crawl",
                         lambda sosok, max_pages=150:
-                        [("005930", "삼성전자")] if sosok == 0 else [("196170", "알테오젠")])
+                        [("005930", "삼성전자", 247500)] if sosok == 0
+                        else [("196170", "알테오젠", 55000)])
     monkeypatch.setattr(master.naver, "fetch_etf",
                         lambda: {"069500": "KODEX 200"})
     out = master.build()
     assert out["count"] == 3
-    assert out["items"] == [["005930", "삼성전자"],
-                            ["196170", "알테오젠"],
-                            ["069500", "KODEX 200"]]
+    assert out["items"] == [["005930", "삼성전자", 247500],
+                            ["196170", "알테오젠", 55000],
+                            ["069500", "KODEX 200", None]]  # ETF 목록엔 가격이 없다
 
 
 def test_중복_코드는_처음_것만_남는다(monkeypatch):
-    """ETF 가 코스피 목록에도 있으면 앞(시가총액 순)이 이긴다."""
+    """ETF 가 코스피 목록에도 있으면 앞(시가총액 순)이 이긴다 — 가격도 같이."""
     monkeypatch.setattr(master, "crawl",
                         lambda sosok, max_pages=150:
-                        [("069500", "KODEX 200")] if sosok == 0 else [])
+                        [("069500", "KODEX 200", 101760)] if sosok == 0 else [])
     monkeypatch.setattr(master.naver, "fetch_etf", lambda: {"069500": "다른이름"})
     out = master.build()
-    assert out["items"] == [["069500", "KODEX 200"]]
+    assert out["items"] == [["069500", "KODEX 200", 101760]]
 
 
 def test_ETF_실패해도_나머지는_남는다(monkeypatch):
     monkeypatch.setattr(master, "crawl",
                         lambda sosok, max_pages=150:
-                        [("005930", "삼성전자")] if sosok == 0 else [])
+                        [("005930", "삼성전자", 247500)] if sosok == 0 else [])
     monkeypatch.setattr(master.naver, "fetch_etf",
                         lambda: (_ for _ in ()).throw(RuntimeError("ETF 장애")))
     assert master.build()["count"] == 1
@@ -137,9 +161,21 @@ def test_ETF_실패해도_나머지는_남는다(monkeypatch):
 
 def test_결과가_너무_적으면_실패로_본다(monkeypatch):
     """마크업이 바뀌면 조용히 몇 건만 나온다 — 그걸 커밋하면 자동완성이 죽는다."""
-    monkeypatch.setattr(master, "crawl", lambda sosok, max_pages=150: [("005930", "삼성전자")])
+    monkeypatch.setattr(master, "crawl",
+                        lambda sosok, max_pages=150: [("005930", "삼성전자", 247500)])
     monkeypatch.setattr(master.naver, "fetch_etf", lambda: {})
     assert master.is_sane(master.build()) is False
+
+
+def test_ETF_전용_종목은_가격_None으로_채워진다(monkeypatch):
+    """ETF 목록 JSON(naver.parse_etf)에는 가격이 없다. 실측(2026-08-20)상
+    ETF 1,162건 전부가 이미 코스피/코스닥 크롤에 있었지만, 구조적으로
+    ETF 목록에만 있는 경우(코스피/코스닥 크롤에 없음)를 가정해 가격이
+    조용히 0 이나 다른 값으로 채워지지 않고 None 으로 남는지 확인한다."""
+    monkeypatch.setattr(master, "crawl", lambda sosok, max_pages=150: [])
+    monkeypatch.setattr(master.naver, "fetch_etf", lambda: {"069500": "KODEX 200"})
+    out = master.build()
+    assert out["items"] == [["069500", "KODEX 200", None]]
 
 
 # ---------------------------------------------------------------------------
@@ -156,12 +192,12 @@ def test_일시_장애는_한번_재시도_후_성공하면_계속_진다(monkey
             시도["count"] += 1
             raise TimeoutError("일시 장애")
         if page == 1:
-            return {"005930": "삼성전자"}
+            return _sum({"005930": "삼성전자"})
         raise master.naver.EmptyParseError("끝")
 
     monkeypatch.setattr(master.naver, "fetch_market_sum", 가짜)
     out = master.crawl(sosok=0, max_pages=10)
-    assert out == [("005930", "삼성전자")]
+    assert out == [("005930", "삼성전자", None)]
 
 
 def test_일시적으로_빈_페이지도_재시도하면_회복된다(monkeypatch):
@@ -174,8 +210,8 @@ def test_일시적으로_빈_페이지도_재시도하면_회복된다(monkeypat
     "꽉 찬 페이지가 연속되면 그다음 0행을 의심한다" 규칙과 맞물려, 짧은
     페이지 다음의 0행만 정당하게 끝으로 인정되기 때문이다.)"""
     시도 = {"count": 0}
-    데이터 = {1: {"005930": "삼성전자", "000660": "SK하이닉스"},  # 꽉 찬 페이지(2행)
-              2: {"247540": "에코프로비엠"}}                        # 짧은 페이지(1행)
+    데이터 = {1: _sum({"005930": "삼성전자", "000660": "SK하이닉스"}),  # 꽉 찬 페이지(2행)
+              2: _sum({"247540": "에코프로비엠"})}                        # 짧은 페이지(1행)
 
     def 가짜(sosok, page):
         if page == 2 and 시도["count"] == 0:
@@ -187,7 +223,8 @@ def test_일시적으로_빈_페이지도_재시도하면_회복된다(monkeypat
 
     monkeypatch.setattr(master.naver, "fetch_market_sum", 가짜)
     out = master.crawl(sosok=0, max_pages=10)
-    assert out == [("005930", "삼성전자"), ("000660", "SK하이닉스"), ("247540", "에코프로비엠")]
+    assert out == [("005930", "삼성전자", None), ("000660", "SK하이닉스", None),
+                   ("247540", "에코프로비엠", None)]
 
 
 def test_재시도해도_실패하면_부분리스트_대신_예외를_낸다(monkeypatch):
@@ -196,7 +233,7 @@ def test_재시도해도_실패하면_부분리스트_대신_예외를_낸다(mo
     MIN_SANE 을 우연히 넘겨 잘린 마스터가 커밋될 수 있다."""
     def 가짜(sosok, page):
         if page < 3:
-            return {f"00000{page}": f"종목{page}"}
+            return _sum({f"00000{page}": f"종목{page}"})
         raise TimeoutError("영구 장애")
 
     monkeypatch.setattr(master.naver, "fetch_market_sum", 가짜)
@@ -208,7 +245,7 @@ def test_max_pages_안에서_끝을_못_찾으면_예외를_낸다(monkeypatch):
     """모든 페이지가 매번 새 종목을 낸다면(=끝 신호를 한 번도 못 만났다)
     잘린 리스트를 "이게 전부"로 조용히 돌려주면 안 된다."""
     monkeypatch.setattr(master.naver, "fetch_market_sum",
-                        lambda sosok, page: {f"{page:06d}": f"종목{page}"})
+                        lambda sosok, page: _sum({f"{page:06d}": f"종목{page}"}))
     with pytest.raises(master.CrawlFailed):
         master.crawl(sosok=0, max_pages=5)
 
@@ -222,7 +259,7 @@ def test_코스피_크롤_실패는_숨기지_않고_build를_그대로_실패�
     def 크롤(sosok, max_pages=150):
         if sosok == 0:
             raise master.CrawlFailed("코스피 실패")
-        return [("196170", "알테오젠")]
+        return [("196170", "알테오젠", 55000)]
 
     monkeypatch.setattr(master, "crawl", 크롤)
     monkeypatch.setattr(master.naver, "fetch_etf", lambda: {"069500": "KODEX 200"})
@@ -303,7 +340,7 @@ def test_재시도_순서가_바뀌어도_결과가_같다_타임아웃_다음_�
 
     def 가짜(sosok, page):
         if page == 1:
-            return {"005930": "삼성전자"}
+            return _sum({"005930": "삼성전자"})
         if page == 2:
             if 시도2["count"] == 0:
                 시도2["count"] += 1
@@ -323,7 +360,7 @@ def test_재시도_순서가_바뀌어도_결과가_같다_빈페이지_다음_�
 
     def 가짜(sosok, page):
         if page == 1:
-            return {"005930": "삼성전자"}
+            return _sum({"005930": "삼성전자"})
         if page == 2:
             if 시도2["count"] == 0:
                 시도2["count"] += 1
@@ -339,8 +376,8 @@ def test_재시도_순서가_바뀌어도_결과가_같다_빈페이지_다음_�
 def test_짧은_페이지_다음의_0행_확정은_끝으로_받아들인다(monkeypatch):
     """짧은 페이지(=page_size 보다 적은 행) 다음의 0행 확정은 실측된
     정상 종료 패턴이다 — 코스피 마지막 실제 페이지(28행 < 50행)처럼."""
-    페이지 = {1: {"a": "1", "b": "2"},   # 꽉 찬 페이지(2행, page_size 로 학습)
-              2: {"c": "3"}}              # 짧은 페이지(1행)
+    페이지 = {1: _sum({"a": "1", "b": "2"}),   # 꽉 찬 페이지(2행, page_size 로 학습)
+              2: _sum({"c": "3"})}              # 짧은 페이지(1행)
 
     def 가짜(sosok, page):
         if page in 페이지:
@@ -349,7 +386,7 @@ def test_짧은_페이지_다음의_0행_확정은_끝으로_받아들인다(mon
 
     monkeypatch.setattr(master.naver, "fetch_market_sum", 가짜)
     out = master.crawl(sosok=0, max_pages=10)
-    assert [c for c, _ in out] == ["a", "b", "c"]
+    assert [c for c, *_ in out] == ["a", "b", "c"]
 
 
 def test_꽉_찬_페이지가_연속된_직후_0행이면_장애로_의심해_예외를_낸다(monkeypatch):
@@ -359,7 +396,7 @@ def test_꽉_찬_페이지가_연속된_직후_0행이면_장애로_의심해_�
     0행이 오면(=끝의 정상 패턴이 아니다) 끝으로 믿지 않는다."""
     def 가짜(sosok, page):
         if page <= 3:
-            return {f"{page:06d}a": "종목", f"{page:06d}b": "종목"}  # 매 페이지 2행(꽉 참)
+            return _sum({f"{page:06d}a": "종목", f"{page:06d}b": "종목"})  # 매 페이지 2행(꽉 참)
         raise master.naver.EmptyParseError("끝(이라고 주장)")
 
     monkeypatch.setattr(master.naver, "fetch_market_sum", 가짜)
@@ -384,13 +421,13 @@ def test_직렬화해도_시가총액_순서가_유지된다(monkeypatch):
     재정렬해 삼성전자(005930)가 맨 앞에 남지 못한다."""
     monkeypatch.setattr(master, "crawl",
                         lambda sosok, max_pages=150:
-                        [("005930", "삼성전자"), ("000660", "SK하이닉스"),
-                         ("005935", "삼성전자우")] if sosok == 0 else [])
+                        [("005930", "삼성전자", 247500), ("000660", "SK하이닉스", 1500000),
+                         ("005935", "삼성전자우", 173700)] if sosok == 0 else [])
     monkeypatch.setattr(master.naver, "fetch_etf", lambda: {})
     m = master.build()
     round_tripped = json.loads(json.dumps(m, ensure_ascii=False, sort_keys=True))
-    assert round_tripped["items"][0] == ["005930", "삼성전자"]
-    assert [c for c, _ in round_tripped["items"]] == ["005930", "000660", "005935"]
+    assert round_tripped["items"][0] == ["005930", "삼성전자", 247500]
+    assert [c for c, *_ in round_tripped["items"]] == ["005930", "000660", "005935"]
 
 
 def test_ETF_실패는_경고_로그를_남긴다(monkeypatch, capsys):
@@ -399,7 +436,7 @@ def test_ETF_실패는_경고_로그를_남긴다(monkeypatch, capsys):
     찍히는지 확인한다."""
     monkeypatch.setattr(master, "crawl",
                         lambda sosok, max_pages=150:
-                        [("005930", "삼성전자")] if sosok == 0 else [])
+                        [("005930", "삼성전자", 247500)] if sosok == 0 else [])
     monkeypatch.setattr(master.naver, "fetch_etf",
                         lambda: (_ for _ in ()).throw(RuntimeError("ETF 장애")))
     master.build()

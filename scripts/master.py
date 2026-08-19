@@ -5,8 +5,15 @@
 페이지 수가 바뀌어도 안전하다. 2026-08-20 실측(마지막 빈 페이지 포함해
 끝까지 다시 돌림): 코스피 51p(2,478종목), 코스닥 38p(1,821종목),
 ETF 1,162개 — 단 ETF 는 **전부** 코스피+코스닥 크롤 안에 이미 있었다
-(이름도 전부 일치, 불일치 0건). 총 4,299종목, master.json 실측 크기
-207,470바이트(1MB 상한의 약 20%).
+(이름도 전부 일치, 불일치 0건). 총 4,299종목.
+
+master.json 실측 크기(2026-08-20, `build()` 를 실제로 돌려 `gh.write_json`
+과 같은 직렬화(`ensure_ascii=False, indent=1, sort_keys=True`)로 측정):
+**248,295바이트**(1MB 상한의 약 24%) — 가격 컬럼 추가 전(코드+이름만)엔
+207,470바이트였다. 4,299건 각각에 정수 하나(가격)가 늘어 약 4만바이트
+(19%) 커졌다. 이 실측 실행에서 가격이 None 인 항목은 0건이었다(4,299건
+전부 파싱 성공 — naver.py parse_market_sum docstring의 전수 확인과 같은
+결과).
 
 구현계획.md 의 공급 코드에서 아래를 고쳤다(각 지점에 주석 있음) — 근거는
 tests/test_master.py 모듈 docstring 참조:
@@ -59,6 +66,26 @@ F2. `MIN_SANE` 테스트가 상수 하한만 확인해 상한 없는 회귀(예:
 F3. `items` 가 dict 가 아니라 list 여야 하는 이유(이 모듈이 가장 길게
    설명하는 불변식)를 실제로 `json.dumps(..., sort_keys=True)` 를 거쳐
    검증하는 테스트가 없었다 — 추가했다(tests 참조).
+
+**매입가 오타 가드 참고가 (app.js) — items 에 가격 추가**:
+
+app.js 의 ±30% 오타 가드는 quotes.json 값을 참고가로 쓰는데, quotes.json
+은 "지금 보유 중"인 종목만 담아(quotes.py open_codes) **신규 매수엔
+구조적으로 안 걸렸다**. 이 시가총액 크롤이 이미 정규식으로 훑는 표 안에
+현재가 컬럼이 있어(naver.parse_market_sum 실측, 2026-08-20 — 4,299종목
+전수 확인, 빈 셀·"-" 0건) 추가 요청 없이 실을 수 있다. 그래서 `items` 의
+각 원소가 `[코드, 이름]` 에서 `[코드, 이름, 가격]` 으로 늘었다 — 가격은
+int 또는 None(naver.py 가 이미 클램프 없이 정리해 돌려준 값을 crawl()·
+build() 는 그대로 옮기기만 한다). `_etf()` 는 ETF 목록 JSON 자체에
+가격이 없어 항상 None 을 채운다(위 `_etf` 참조) — 실측상 ETF 는 100%
+코스피/코스닥 크롤에 이미 포함돼 있어 최종 items 에 이 None 이 실제로
+남는 경우는 없었다.
+
+app.js 쪽(구 배열 `[code, name]` 을 여전히 2-요소로 destructure 하는
+코드, `new Map(MASTER)` 로 code→name 을 뽑는 코드)은 세 번째 요소가
+늘어도 그대로 동작한다 — JS 배열 구조분해와 Map 생성자 둘 다 각 항목의
+앞 두 요소만 쓰고 나머지는 무시한다(실브라우저로 확인, 커밋 메시지
+참조). 그래서 이 변경은 그 쪽 코드를 고치지 않아도 되는 하위호환이다.
 """
 from __future__ import annotations
 
@@ -149,7 +176,11 @@ def _fetch_page(sosok: int, page: int):
 
 
 def crawl(sosok: int, max_pages: int = 150) -> list:
-    """[(코드, 이름)] 을 **페이지 순서 그대로** 돌려준다 (= 시가총액 순).
+    """[(코드, 이름, 가격)] 을 **페이지 순서 그대로** 돌려준다 (= 시가총액 순).
+
+    가격은 naver.parse_market_sum 이 이미 뽑아오는 현재가 컬럼을 그대로
+    옮긴다(int 또는 None — 클램프하지 않는다, naver.py 참조). 이 함수는
+    그 값을 판단하거나 채우지 않고 그대로 통과시키기만 한다.
 
     새 종목이 안 나올 때까지(또는 EmptyParseError 확정까지) 넘긴다 —
     페이지 수가 상장/폐지로 바뀌어도 안전하다. 2026-08-20 실측: 코스피
@@ -190,10 +221,10 @@ def crawl(sosok: int, max_pages: int = 150) -> list:
             page_size = n
         full_streak = full_streak + 1 if n == page_size else 0
         before = len(out)
-        for code, name in got.items():
+        for code, info in got.items():
             if code not in seen:
                 seen.add(code)
-                out.append((code, name))
+                out.append((code, info["name"], info["price"]))
         if len(out) == before:          # 새 게 없다 = 마지막 페이지를 지났다
             return out
     raise CrawlFailed(f"sosok={sosok}: max_pages({max_pages})에 닿았는데 끝을 못 찾았다")
@@ -211,6 +242,13 @@ def build() -> dict:
     `json.dumps(..., sort_keys=True)` 왕복으로 이 불변식을 고정하는
     테스트는 tests/test_master.py 참조 — 리뷰 F3.)
 
+    각 항목은 `[코드, 이름, 가격]` — 가격은 app.js 의 매입가 오타 가드가
+    "지금 보유 중이 아닌" 종목(신규 매수)에도 참고가를 쓸 수 있게 하는
+    과제(quotes.json 은 보유 중 종목만 담아 신규 매수엔 참고가가 없었다)
+    가 추가했다. `crawl()`/`_etf()` 가 이미 int 또는 None 으로 정리해
+    돌려준 값을 여기서는 그대로 옮긴다 — 이 함수 자신은 가격을 판단하지
+    않는다(클램프 금지 원칙은 naver.parse_market_sum 에서 이미 지켰다).
+
     코스피/코스닥 크롤은 여기서 순서대로(아직 병렬 아님) 직접 부른다 —
     ETF 와 달리 실패를 여기서 잡지 않는다: `crawl()` 이 낸 `CrawlFailed`
     는 그대로 이 함수 밖으로 전파된다. 코스피가 실패했는데 코스닥+ETF
@@ -225,16 +263,28 @@ def build() -> dict:
     etf = _etf()
     items, seen = [], set()
     for group in (kospi, kosdaq, etf):      # 코스피 → 코스닥 → ETF
-        for code, name in group:
+        for code, name, price in group:
             if code not in seen:
                 seen.add(code)
-                items.append([code, name])
+                items.append([code, name, price])
     return {"generated_kst": quotes.now_kst(), "count": len(items), "items": items}
 
 
 def _etf() -> list:
+    """[(코드, 이름, 가격)]. ETF 목록 JSON(naver.parse_etf)에는 가격이
+    없다 — 이름만 담아 온다. 그래서 여기서 만드는 가격은 항상 None 이다.
+
+    실측(2026-08-20): ETF 1,162건 전부가 이미 코스피+코스닥 크롤 안에
+    있었고 이름도 전부 일치했다 — build() 가 코스피/코스닥을 먼저 합치고
+    ETF 를 나중에 합치므로(중복은 앞선 것이 남는다), 실전에서 이 함수가
+    낸 price=None 이 최종 items 에 실제로 남는 경우는 없었다. 그래도
+    구조적으로 남을 수 있는 경우(ETF 목록에만 있고 시가총액 크롤에는
+    없는 신규 상장 등)를 대비해 가격 필드를 아예 없애지 않고 None 으로
+    채워 나머지 두 그룹과 튜플 모양을 맞춘다 — build() 의 언패킹이
+    그룹마다 다른 모양을 신경 쓰지 않아도 된다.
+    """
     try:
-        return list(naver.fetch_etf().items())
+        return [(code, name, None) for code, name in naver.fetch_etf().items()]
     except Exception as e:
         print(f"[경고] ETF 실패: {type(e).__name__}: {e}")
         return []

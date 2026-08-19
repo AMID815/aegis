@@ -13,7 +13,11 @@ import math
 import re
 
 SCHEMA = 1
-CODE_RE = re.compile(r"^\d{6}$")
+# KRX 는 숫자 6자리만 쓰지 않는다 — 2026-08-19 실측: 삼성에피스홀딩스 0126Z0,
+# SOL AI반도체TOP2플러스 0167A0 등 영숫자 코드가 코스피 상위 종목·ETF 에도
+# 섞여 있다(대문자만 나타남, 소문자는 실측된 바 없다). 숫자만 받으면
+# naver.parse_market_sum 이 뽑아온 코드를 intake 가 문 앞에서 거부하게 된다.
+CODE_RE = re.compile(r"^[0-9A-Z]{6}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 OPEN, CLOSED = "open", "closed"
 

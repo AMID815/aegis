@@ -50,6 +50,8 @@ def test_보유중이_아닌_종목_매도는_거부한다():
 
 @pytest.mark.parametrize("bad", [
     {"code": "5930", "name": "x", "price": 100, "date": "2026-08-19"},        # 6자리 아님
+    {"code": "12345", "name": "x", "price": 100, "date": "2026-08-19"},       # 5자리
+    {"code": "abcdef", "name": "x", "price": 100, "date": "2026-08-19"},      # 소문자 — KRX 는 대문자만
     {"code": "005930", "name": "x", "price": 0, "date": "2026-08-19"},        # 가격 0
     {"code": "005930", "name": "x", "price": -1, "date": "2026-08-19"},       # 음수
     {"code": "005930", "name": "x", "price": 100, "date": "2026/08/19"},      # 날짜 형식
@@ -58,6 +60,16 @@ def test_보유중이_아닌_종목_매도는_거부한다():
 def test_잘못된_입력은_거부한다(bad):
     with pytest.raises(models.RejectedError):
         models.apply_buy(models.empty_state(), bad)
+
+
+def test_KRX_영숫자_코드도_받는다():
+    """2026-08-19 실측: 0126Z0(삼성에피스홀딩스)처럼 숫자만이 아닌 코드가
+    코스피 상위종목에도 있다. naver.parse_market_sum 이 이런 코드를 뽑아오는데
+    여기서 거부하면 마스터에는 있고 매수 입력만 안 되는 상태가 된다."""
+    out = models.apply_buy(models.empty_state(), {
+        "code": "0126Z0", "name": "삼성에피스홀딩스", "price": 363500,
+        "date": "2026-08-19"})
+    assert out["positions"][0]["code"] == "0126Z0"
 
 
 def test_출처를_비우면_수동이_된다():

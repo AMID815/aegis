@@ -460,3 +460,118 @@ def test_최상위_부가_키는_반영_후에도_살아있다(monkeypatch):
     assert intake.main() == 0
     assert captured["body"]["cash"] == 5000000
     assert captured["body"]["watchlist"] == ["035420"]
+
+
+# ---------------------------------------------------------------------------
+# Task 15 — amend 를 intake.main() 을 통해 겨눈다 (issue 본문 → 종료코드/커밋)
+# ---------------------------------------------------------------------------
+
+기존_삼성 = {"schema": 1, "positions": [
+    {"id": "20260819-005930", "code": "005930", "name": "삼성전자",
+     "buys": [{"date": "2026-08-19", "price": 247500}],
+     "exits": [], "adjustments": [], "status": "open",
+     "source": "종가베팅", "memo": "눌림", "signal_date": "2026-08-18"},
+]}
+
+AMEND_BODY = ('```json\n{"op":"amend","id":"20260819-005930","was":"005930",'
+              '"memo":"고침"}\n```')
+
+
+def test_amend_이슈가_반영되면_0을_반환하고_쓴다(monkeypatch):
+    monkeypatch.setattr(intake.gh, "read_json",
+                        lambda *a, **k: (기존_삼성, "SHA123"))
+    captured = {}
+
+    def 가짜_쓰기(path, body, sha, message):
+        captured["path"] = path
+        captured["body"] = body
+        captured["sha"] = sha
+        captured["message"] = message
+
+    monkeypatch.setattr(intake.gh, "write_json", 가짜_쓰기)
+    monkeypatch.setenv("ISSUE_BODY", AMEND_BODY)
+    assert intake.main() == 0
+    assert captured["sha"] == "SHA123"
+    p = captured["body"]["positions"][0]
+    assert p["memo"] == "고침"
+    assert p["id"] == "20260819-005930"
+
+
+def test_amend에서_대상_id가_없으면_2를_반환한다(monkeypatch):
+    monkeypatch.setattr(intake.gh, "read_json",
+                        lambda *a, **k: (기존_삼성, "sha"))
+    쓴것 = []
+    monkeypatch.setattr(intake.gh, "write_json", lambda *a, **k: 쓴것.append(a))
+    없는_id = ('```json\n{"op":"amend","id":"20260101-999999","was":"005930",'
+             '"memo":"고침"}\n```')
+    monkeypatch.setenv("ISSUE_BODY", 없는_id)
+    assert intake.main() == 2
+    assert 쓴것 == []
+
+
+def test_amend에서_was가_다르면_2를_반환한다(monkeypatch):
+    monkeypatch.setattr(intake.gh, "read_json",
+                        lambda *a, **k: (기존_삼성, "sha"))
+    쓴것 = []
+    monkeypatch.setattr(intake.gh, "write_json", lambda *a, **k: 쓴것.append(a))
+    was_틀림 = ('```json\n{"op":"amend","id":"20260819-005930","was":"000660",'
+              '"memo":"고침"}\n```')
+    monkeypatch.setenv("ISSUE_BODY", was_틀림)
+    assert intake.main() == 2
+    assert 쓴것 == []
+
+
+def test_amend에서_바뀐게_없으면_4를_반환하고_쓰지_않는다(monkeypatch):
+    monkeypatch.setattr(intake.gh, "read_json",
+                        lambda *a, **k: (기존_삼성, "sha"))
+    쓴것 = []
+    monkeypatch.setattr(intake.gh, "write_json", lambda *a, **k: 쓴것.append(a))
+    변화없음 = ('```json\n{"op":"amend","id":"20260819-005930","was":"005930",'
+              '"memo":"눌림"}\n```')   # 이미 저장된 값과 동일
+    monkeypatch.setenv("ISSUE_BODY", 변화없음)
+    assert intake.main() == 4
+    assert 쓴것 == []
+
+
+# 코드리뷰 포인트 8(amend 판) — normalize() 는 name/id 필드를 내용 검증 없이
+# 그대로 보존한다(비어있지 않으면 setdefault 가 손대지 않는다). 즉 과거의
+# 손편집이 이 두 필드에 개행/가짜 트레일러를 심어놨을 수 있다 — amend 가
+# 그 필드를 이번 요청에서 건드리지 않았더라도, 커밋 메시지를 조립할 때
+# "저장된 값을 그대로" 쓰면 그 오염이 새 커밋으로 옮겨붙는다. name 뿐 아니라
+# id 도 같은 채널이라 커밋 메시지 조립 시 둘 다 _single_line 을 거쳐야 한다.
+def test_amend_커밋_메시지는_저장된_이름의_개행도_지운다(monkeypatch):
+    오염됨 = {"schema": 1, "positions": [
+        {"id": "20260819-005930", "code": "005930",
+         "name": "삼성전자\n악성 트레일러",       # 과거 손편집이 남긴 오염
+         "buys": [{"date": "2026-08-19", "price": 247500}],
+         "exits": [], "adjustments": [], "status": "open",
+         "source": "종가베팅", "memo": "눌림", "signal_date": None},
+    ]}
+    monkeypatch.setattr(intake.gh, "read_json", lambda *a, **k: (오염됨, "sha"))
+    captured = {}
+
+    def 가짜_쓰기(path, body, sha, message):
+        captured["message"] = message
+
+    monkeypatch.setattr(intake.gh, "write_json", 가짜_쓰기)
+    # 이번 amend 요청은 name 을 건드리지 않는다 — memo 만 고친다.
+    monkeypatch.setenv("ISSUE_BODY", AMEND_BODY)
+    assert intake.main() == 0
+    assert "\n" not in captured["message"]
+    assert "삼성전자" in captured["message"]
+
+
+def test_amend_커밋_메시지에_고친_기록의_이름과_id가_들어간다(monkeypatch):
+    monkeypatch.setattr(intake.gh, "read_json",
+                        lambda *a, **k: (기존_삼성, "sha"))
+    captured = {}
+
+    def 가짜_쓰기(path, body, sha, message):
+        captured["message"] = message
+
+    monkeypatch.setattr(intake.gh, "write_json", 가짜_쓰기)
+    monkeypatch.setenv("ISSUE_BODY", AMEND_BODY)
+    assert intake.main() == 0
+    assert "삼성전자" in captured["message"]
+    assert "20260819-005930" in captured["message"]
+    assert captured["message"].startswith("amend:")

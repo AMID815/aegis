@@ -250,3 +250,117 @@ def apply_sell(state: dict, req: dict) -> dict:
         "date": date, "price": price, "reason": _text(req.get("reason"), 40, default="")})
     target["status"] = CLOSED
     return state
+
+
+def apply_amend(state: dict, req: dict) -> dict:
+    """기존 기록 하나를 고친다 — **패치**다, 교체가 아니다(Task 15, 구현계획.md).
+
+    페이로드에 없는 키는 안 바뀐다. `exits` 를 언급하지 않으면 `exits` 는
+    그대로 남는다 — 교체로 만들면 매도 기록이 통째로 사라지는 경로가 생긴다.
+
+    설계 그대로 지키는 규칙:
+    1. `was` 가 대상 기록의 **현재** `code` 와 다르면 거부한다. `id` 만으로
+       지목하면 페이지가 낡은 목록을 들고 있을 때(또는 이슈를 열어두고
+       나중에 제출할 때) 엉뚱한 기록을 고칠 수 있다.
+    2. `id` 는 (매입일+코드) 로 재계산한다. 새 `id` 가 자신이 아닌 다른
+       기록의 것과 겹치면 거부한다(중복 생성 금지).
+    3. `exit` 는 이미 `exits` 가 있는(=종결된) 기록에만 줄 수 있다 —
+       `amend` 로 매도를 새로 만들지 않는다. 그건 `sell` 의 일이다.
+    4. 정규화된 값까지 비교해서 아무것도 안 바뀌면 `AlreadyApplied` —
+       빈 커밋을 만들지 않는다. "247500" 과 "247500.0" 처럼 `_price` 가
+       정규화하면 같아지는 값은 "바뀐 것"으로 치지 않는다 — 비교를
+       패치 **적용 전 JSON** 이 아니라 **적용 후 정규화된 필드**로 하기
+       때문에 저절로 이렇게 된다.
+    5. 값 검증은 `buy`/`sell` 과 완전히 같은 헬퍼(`_code`/`_date`/`_price`/
+       `_text`)를 쓴다. `amend` 만 느슨하면 가드를 우회하는 뒷문이 된다.
+
+    설계 문서에 없어서 이 구현이 코드리뷰로 추가한 두 가지:
+    - `code` 를 고치면서 `name` 을 안 주면 거부한다. 패치 규칙(1)을 곧이
+      곧대로 따르면 종목만 바뀌고 표시 이름은 이전 종목 이름으로 남는데,
+      그건 기록이 거짓말을 하는 것과 같다 — "고친다"는 취지에 어긋난다.
+    - 패치를 전부 적용한 뒤, 최종 매수일이 최종 매도일보다 늦으면 거부한다.
+      `apply_sell` 은 매도 **시점**에 이 순서를 지키지만, `amend` 가 나중에
+      `buy.date` 나 `exit.date` 를 따로 옮기면 그 가드를 건너뛸 수 있다 —
+      같은 불변식을 여기서도 지킨다.
+
+    `signal_date` 도 최상위 키로 고칠 수 있다 — 설계 페이로드 예시에는
+    없지만, 매수 시 검증하는 필드(코드리뷰로 지적된 gap)를 amend 로는
+    못 고치는 게 오히려 비대칭이라 넣었다. `apply_buy` 와 같은 규칙
+    (매수일보다 늦으면 거부)을 그대로 적용한다.
+
+    `adjustments` 는 건드리지 않는다 — 지금 이 필드를 쓰는 쪽이 없고
+    (아무도 안 씀), 페이지도 이 필드가 있는 기록은 가격 파생값 계산 자체를
+    건너뛴다. amend 페이로드에 이 필드의 모양이 정의돼 있지 않은데 여기서
+    임의로 스키마를 만들면 아무도 합의하지 않은 걸 새로 만드는 셈이다.
+    """
+    target_id = req.get("id")
+    was = req.get("was")
+    state = normalize(state)
+    idx = next((i for i, p in enumerate(state["positions"]) if p["id"] == target_id), None)
+    if idx is None:
+        raise RejectedError(f"고칠 대상 없음: {target_id!r}")
+    match = state["positions"][idx]
+    if match["code"] != was:
+        raise RejectedError(
+            f"코드 불일치(was) — 저장된 값과 다름: 저장={match['code']!r} 요청={was!r}")
+
+    if "code" in req and "name" not in req:
+        # 패치 규칙을 곧이곧대로 따르면 code 만 바뀌고 name 은 이전 종목
+        # 이름으로 남는다 — "고친다"는 취지에 어긋나는 거짓 기록이 된다.
+        raise RejectedError("code 를 고치려면 name 도 함께 줘야 함 — 이름이 낡은 채로 남는다")
+
+    new = copy.deepcopy(match)   # match(=state 내부 참조)를 직접 건드리지 않는다
+
+    if "code" in req:
+        new["code"] = _code(req["code"])
+    if "name" in req:
+        new["name"] = _text(req.get("name"), 40, default=new["code"])
+    if "source" in req:
+        new["source"] = _text(req.get("source"), 20, default="수동", strict=True)
+    if "memo" in req:
+        new["memo"] = _text(req.get("memo"), 200, default="")
+    if "signal_date" in req:
+        sig = req.get("signal_date") or None
+        new["signal_date"] = _date(sig) if sig else None
+
+    buy_patch = req.get("buy")
+    if buy_patch is not None:
+        if not isinstance(buy_patch, dict):
+            raise RejectedError(f"buy 가 객체가 아님: {buy_patch!r}")
+        if "price" in buy_patch:
+            new["buys"][0]["price"] = _price(buy_patch["price"])
+        if "date" in buy_patch:
+            new["buys"][0]["date"] = _date(buy_patch["date"])
+
+    exit_patch = req.get("exit")
+    if exit_patch is not None:
+        if not isinstance(exit_patch, dict):
+            raise RejectedError(f"exit 가 객체가 아님: {exit_patch!r}")
+        if not new["exits"]:
+            raise RejectedError("종결되지 않은 기록에는 exit 를 줄 수 없음 — 매도는 sell 의 일")
+        if "price" in exit_patch:
+            new["exits"][0]["price"] = _price(exit_patch["price"])
+        if "date" in exit_patch:
+            new["exits"][0]["date"] = _date(exit_patch["date"])
+        if "reason" in exit_patch:
+            new["exits"][0]["reason"] = _text(exit_patch.get("reason"), 40, default="")
+
+    buy_date = new["buys"][0]["date"]
+    if new["signal_date"] and new["signal_date"] > buy_date:
+        raise RejectedError(
+            f"시그널일이 매수일보다 늦음: signal={new['signal_date']} buy={buy_date}")
+    if new["exits"] and new["exits"][0]["date"] < buy_date:
+        raise RejectedError(
+            f"매도일이 매수일보다 이름: sell={new['exits'][0]['date']} buy={buy_date}")
+
+    new_id = f"{buy_date.replace('-', '')}-{new['code']}"
+    if new_id != match["id"] and any(
+            p["id"] == new_id for i, p in enumerate(state["positions"]) if i != idx):
+        raise RejectedError(f"이미 있는 id 로 바뀜(중복 생성 금지): {new_id!r}")
+    new["id"] = new_id
+
+    if new == match:
+        raise AlreadyApplied(match["id"])
+
+    state["positions"][idx] = new
+    return state

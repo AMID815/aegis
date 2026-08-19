@@ -89,6 +89,8 @@ def apply(state: dict, req: dict) -> dict:
         return models.apply_buy(state, req)
     if op == "sell":
         return models.apply_sell(state, req)
+    if op == "amend":
+        return models.apply_amend(state, req)
     raise models.RejectedError(f"모르는 op: {op!r}")
 
 
@@ -206,11 +208,31 @@ def main() -> int:
             f"— 쓰지 않고 중단, 코드 버그 의심")
 
     op = req.get("op")
-    # code/date 는 이 시점에 이미 apply() 안의 _code()/_date() 를 통과했다
-    # — 둘 다 글자 집합이 정규식(`\Z` 앵커, 개행 불가)으로 고정돼 있어
-    # name 과 달리 커밋 메시지용 별도 정리가 필요 없다.
-    name = _single_line(req.get("name")) or req.get("code")
-    message = f"{op}: {name} ({req.get('date')})"
+    if op == "amend":
+        # amend 는 buy/sell 과 달리 이번 요청이 name 을 안 건드렸을 수
+        # 있다(패치 규칙) — 그러면 커밋 메시지용 이름은 "이번에 낸 값"이
+        # 아니라 "고친 뒤 기록에 남은 값"이어야 한다. 그 값이 이번 요청이
+        # 아니라 **과거에 저장된** name/id 필드일 수도 있는데, normalize()
+        # 는 이 두 필드를 내용 검증 없이 보존한다(있으면 setdefault 가
+        # 손대지 않는다) — 즉 예전 손편집이 개행이나 가짜 git 트레일러를
+        # 남겨놨어도 그대로 실려온다. code/date 와 달리 이 두 필드는 정규식
+        # 앵커로 개행이 원천 차단되지 않으므로, 이번에 amend 가 건드렸든
+        # 안 건드렸든 커밋 메시지에 넣기 전에는 항상 _single_line 을
+        # 거친다(리뷰 포인트 6 과 같은 이유, 출처만 다르다).
+        changed = next((new_p for old_p, new_p in zip(state["positions"], out["positions"])
+                        if old_p != new_p), None)
+        # apply()가 AlreadyApplied 를 안 냈다면(여기 도달했다면) 반드시 하나는
+        # 바뀌어 있다 — 못 찾으면 apply_amend 자체의 버그다.
+        assert changed is not None, "amend 반영됐다는데 바뀐 기록을 못 찾음 — 코드 버그"
+        name = _single_line(changed["name"]) or changed["code"]
+        pid = _single_line(changed["id"]) or changed["code"]
+        message = f"amend: {name} ({pid})"
+    else:
+        # code/date 는 이 시점에 이미 apply() 안의 _code()/_date() 를 통과했다
+        # — 둘 다 글자 집합이 정규식(`\Z` 앵커, 개행 불가)으로 고정돼 있어
+        # name 과 달리 커밋 메시지용 별도 정리가 필요 없다.
+        name = _single_line(req.get("name")) or req.get("code")
+        message = f"{op}: {name} ({req.get('date')})"
     try:
         gh.write_json(POSITIONS, out, sha, message)
     except RuntimeError as e:
@@ -223,7 +245,11 @@ def main() -> int:
         print(f"[오류] positions.json 쓰기 실패 — 재시도 필요, 파일 문제 아님: {e}")
         raise
     held = sum(1 for p in out["positions"] if p["status"] == models.OPEN)
-    print(f"반영: {op} {req.get('code')} — 보유 {held}건")
+    # amend 는 req 에 code 가 없는 게 보통이다(패치 규칙 — 코드를 안 고치면
+    # 안 적는다) — 그 흔한 경우에 "반영: amend None" 처럼 찍히지 않게 위에서
+    # 이미 계산해둔(sanitize 까지 끝난) pid 를 쓴다.
+    target = pid if op == "amend" else req.get("code")
+    print(f"반영: {op} {target} — 보유 {held}건")
     return 0
 
 

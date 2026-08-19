@@ -441,3 +441,238 @@ def test_dropped_항목은_어떤_non_dict_타입이든_dict로_감싼다(bad_it
     assert len(dropped) == 1
     assert isinstance(dropped[0], dict)
     assert dropped[0].get("id") == "(알 수 없음)"
+
+
+# ── Task 15: amend — 기록 고치기 (구현계획.md 참조) ─────────────────────────
+#
+# amend 는 손편집을 없애기 위한 연산이다. 규칙(설계 그대로):
+#  1. 패치다, 교체가 아니다 — 페이로드에 없는 키는 안 바뀐다.
+#  2. was 가 저장된 code 와 다르면 거부.
+#  3. id 는 (매입일+코드) 로 재계산, 충돌하면 거부.
+#  4. exit 는 이미 종결된(exits 가 있는) 기록에만.
+#  5. 아무것도 안 바뀌면 AlreadyApplied.
+#  6. 값 검증은 buy/sell 과 같은 헬퍼를 쓴다.
+# 이 구현이 설계에 추가로 얹은 두 가지(코드리뷰 판단):
+#  - code 를 고치면서 name 을 안 주면 거부(이름이 낡은 채로 남는 사고 방지).
+#  - 최종 매수일이 최종 매도일보다 늦어지면 거부(apply_sell 의 가드를
+#    amend 가 우회하는 뒷문이 되지 않게).
+
+
+def _닫힌_상태(buy_price=247500, buy_date="2026-08-19",
+             sell_price=260000, sell_date="2026-08-25"):
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": buy_price,
+        "date": buy_date, "source": "종가베팅", "memo": "눌림"})
+    return models.apply_sell(d, {
+        "code": "005930", "price": sell_price, "date": sell_date, "reason": "목표가"})
+
+
+def test_amend은_매입가를_고친다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    out = models.apply_amend(d, {
+        "id": "20260819-005930", "was": "005930",
+        "buy": {"price": 250000}})
+    p = out["positions"][0]
+    assert p["buys"][0]["price"] == 250000
+    assert p["buys"][0]["date"] == "2026-08-19"      # 안 건드린 키는 그대로
+    assert p["name"] == "삼성전자"                    # 안 건드린 키는 그대로
+
+
+def test_amend은_지정하지_않은_필드를_보존한다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19",
+        "source": "종가베팅", "memo": "눌림", "signal_date": "2026-08-18"})
+    out = models.apply_amend(d, {
+        "id": "20260819-005930", "was": "005930", "memo": "고침"})
+    p = out["positions"][0]
+    assert p["memo"] == "고침"
+    assert p["source"] == "종가베팅"
+    assert p["signal_date"] == "2026-08-18"
+    assert p["name"] == "삼성전자"
+
+
+def test_amend은_종결된_기록의_exits를_지우지_않는다():
+    # 교체가 아니라 패치라는 규칙 1 을 정면으로 겨눈다 — memo 만 고쳐도
+    # exits 가 사라지면 안 된다.
+    d = _닫힌_상태()
+    out = models.apply_amend(d, {
+        "id": "20260819-005930", "was": "005930", "memo": "고침"})
+    p = out["positions"][0]
+    assert p["exits"] == [{"date": "2026-08-25", "price": 260000, "reason": "목표가"}]
+    assert p["status"] == "closed"
+
+
+def test_amend에서_was가_다르면_거부한다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    with pytest.raises(models.RejectedError):
+        models.apply_amend(d, {
+            "id": "20260819-005930", "was": "000660", "memo": "고침"})
+
+
+def test_amend에서_없는_id는_거부한다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    with pytest.raises(models.RejectedError):
+        models.apply_amend(d, {
+            "id": "20260101-999999", "was": "005930", "memo": "고침"})
+
+
+def test_amend은_id를_재계산한다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    out = models.apply_amend(d, {
+        "id": "20260819-005930", "was": "005930", "buy": {"date": "2026-08-18"}})
+    p = out["positions"][0]
+    assert p["id"] == "20260818-005930"
+    assert p["buys"][0]["date"] == "2026-08-18"
+
+
+def test_amend은_새_id가_이미_있으면_거부한다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    d = models.apply_buy(d, {
+        "code": "005930", "name": "삼성전자", "price": 240000, "date": "2026-08-18"})
+    # 08-19 기록의 날짜를 08-18 로 옮기면 이미 있는 08-18 기록과 id 가 충돌한다.
+    with pytest.raises(models.RejectedError):
+        models.apply_amend(d, {
+            "id": "20260819-005930", "was": "005930", "buy": {"date": "2026-08-18"}})
+
+
+def test_amend은_자기_자신과의_id_충돌은_허용한다():
+    # 코드/날짜를 그대로(또는 변화 없는 값으로) 다시 보내도 "이미 있는 id"로
+    # 오판해 거부하면 안 된다 — 자기 자신은 충돌 대상에서 빠져야 한다.
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    out = models.apply_amend(d, {
+        "id": "20260819-005930", "was": "005930", "buy": {"date": "2026-08-19"},
+        "memo": "메모"})
+    assert out["positions"][0]["id"] == "20260819-005930"
+    assert out["positions"][0]["memo"] == "메모"
+
+
+def test_amend은_열린_기록에_exit을_주면_거부한다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    with pytest.raises(models.RejectedError):
+        models.apply_amend(d, {
+            "id": "20260819-005930", "was": "005930",
+            "exit": {"price": 260000}})
+
+
+def test_amend은_닫힌_기록의_exit을_고칠_수_있다():
+    d = _닫힌_상태()
+    out = models.apply_amend(d, {
+        "id": "20260819-005930", "was": "005930",
+        "exit": {"price": 265000, "reason": "손절"}})
+    e = out["positions"][0]["exits"][0]
+    assert e == {"date": "2026-08-25", "price": 265000, "reason": "손절"}
+
+
+def test_amend은_아무것도_안_바뀌면_AlreadyApplied():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19",
+        "memo": "눌림"})
+    with pytest.raises(models.AlreadyApplied) as exc_info:
+        models.apply_amend(d, {
+            "id": "20260819-005930", "was": "005930", "memo": "눌림"})
+    assert exc_info.value.pid == "20260819-005930"
+
+
+def test_amend은_247500과_247500점0을_같은_값으로_보고_AlreadyApplied():
+    # _price 가 정규화한 뒤 비교해야 한다 — 값 비교를 JSON 원본으로 하면
+    # 타입만 다른(247500 vs 247500.0) 이 케이스를 "바뀜"으로 오판한다.
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    with pytest.raises(models.AlreadyApplied):
+        models.apply_amend(d, {
+            "id": "20260819-005930", "was": "005930", "buy": {"price": 247500.0}})
+
+
+def test_amend은_code만_주고_name을_안_주면_거부한다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    with pytest.raises(models.RejectedError):
+        models.apply_amend(d, {
+            "id": "20260819-005930", "was": "005930", "code": "000660"})
+
+
+def test_amend은_code와_name을_함께_주면_반영되고_id도_바뀐다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    out = models.apply_amend(d, {
+        "id": "20260819-005930", "was": "005930",
+        "code": "000660", "name": "SK하이닉스"})
+    p = out["positions"][0]
+    assert p["code"] == "000660"
+    assert p["name"] == "SK하이닉스"
+    assert p["id"] == "20260819-000660"
+
+
+def test_amend은_매수일을_매도일_이후로_옮기면_거부한다():
+    d = _닫힌_상태(buy_date="2026-08-19", sell_date="2026-08-25")
+    with pytest.raises(models.RejectedError):
+        models.apply_amend(d, {
+            "id": "20260819-005930", "was": "005930",
+            "buy": {"date": "2026-08-26"}})
+
+
+def test_amend은_매도일을_매수일_이전으로_옮기면_거부한다():
+    d = _닫힌_상태(buy_date="2026-08-19", sell_date="2026-08-25")
+    with pytest.raises(models.RejectedError):
+        models.apply_amend(d, {
+            "id": "20260819-005930", "was": "005930",
+            "exit": {"date": "2026-08-18"}})
+
+
+def test_amend은_signal_date를_고칠_수_있다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19",
+        "signal_date": "2026-08-18"})
+    out = models.apply_amend(d, {
+        "id": "20260819-005930", "was": "005930", "signal_date": "2026-08-19"})
+    assert out["positions"][0]["signal_date"] == "2026-08-19"
+
+
+def test_amend에서_signal_date가_매입일보다_늦으면_거부한다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    with pytest.raises(models.RejectedError):
+        models.apply_amend(d, {
+            "id": "20260819-005930", "was": "005930", "signal_date": "2026-08-20"})
+
+
+def test_amend은_adjustments를_건드리지_않는다():
+    raw = {"schema": 1, "positions": [
+        {"code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-08-19", "price": 100000}],
+         "adjustments": [{"note": "액면분할", "ratio": 5}]},
+    ]}
+    d = models.normalize(raw)
+    out = models.apply_amend(d, {
+        "id": "20260819-005930", "was": "005930", "memo": "고침"})
+    assert out["positions"][0]["adjustments"] == [{"note": "액면분할", "ratio": 5}]
+
+
+def test_amend에서_매입가_형식이_틀리면_거부한다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    with pytest.raises(models.RejectedError):
+        models.apply_amend(d, {
+            "id": "20260819-005930", "was": "005930", "buy": {"price": "많이"}})
+
+
+def test_amend에서_source가_20자를_넘으면_잘라내지_않고_거부한다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    with pytest.raises(models.RejectedError):
+        models.apply_amend(d, {
+            "id": "20260819-005930", "was": "005930", "source": "가" * 21})
+
+
+def test_amend_결과는_정규화해도_그대로다():
+    d = _닫힌_상태()
+    out = models.apply_amend(d, {
+        "id": "20260819-005930", "was": "005930", "memo": "고침"})
+    assert models.normalize(out) == out

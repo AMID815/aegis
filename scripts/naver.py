@@ -118,6 +118,13 @@ def parse_polling(body: str) -> dict:
     근거), 배치 하나(최대 60종목)를 통째로 죽이지 않도록 종목 하나만
     건너뛴다. 행이 dict 가 아닌 경우(마크업이 통째로 바뀌어 리스트 등이
     오는 극단적인 경우)도 같이 걸러 나머지 종목은 살린다.
+
+    여기 나오는 stockName 도 한글이지만 _corrupted() 는 걸지 않는다. 이유는
+    이름에 한글이 없어서가 아니라(있다) 이 엔드포인트가 애초에 UTF-8 이라
+    parse_market_sum·parse_etf 를 위협하는 EUC-KR/UTF-8 코덱 불일치가 여기선
+    발생할 수 없고, 화면도 종목명을 quotes[].name 이 아니라 positions.json 의
+    각 포지션 name(손입력 원본)에서 읽어서 이 필드가 깨져도 렌더링에 영향이
+    없기 때문이다.
     """
     d = json.loads(body)
     out = {}

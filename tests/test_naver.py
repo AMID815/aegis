@@ -28,11 +28,6 @@ MARKET_SUM = """
 <a href="/item/main.naver?code=000660" class="tltle">SK하이닉스</a>
 """
 
-ETF = """{"result":{"etfItemList":[
- {"itemcode":"069500","itemname":"KODEX 200"},
- {"itemcode":"122630","itemname":"KODEX 레버리지"}]}}"""
-
-
 def _etf_body(pairs):
     """[(code,name)...] → parse_etf 입력 JSON. name 이 None 이면 그 필드를 뺀다."""
     rows = []
@@ -239,6 +234,16 @@ def test_strict_디코딩이_진짜_방어선이다():
     애초에 여기까지 오지도 못한다 — 그게 진짜 방어선이라는 걸 문서로 남긴다."""
     with pytest.raises(UnicodeDecodeError):
         _EUCKR_ROW.decode("utf-8", "strict")
+
+
+def test_ETF_이름이_깨지면_실패로_본다():
+    """parse_market_sum 과 같은 방어선(_corrupted)이 parse_etf 에도 걸려 있다.
+    개수 하한(MIN_ETF_ROWS)만으로는 이름이 깨진 걸 못 잡는다 — 채움 항목까지
+    합쳐 문턱을 넉넉히 넘긴 상태에서, 이름 하나에만 치환문자를 심어도
+    실패해야 한다는 걸 확인한다."""
+    body = _padded_etf([("069500", "KODEX 200�")])
+    with pytest.raises(naver.EmptyParseError):
+        naver.parse_etf(body)
 
 
 # I3: float("1e400") 은 예외 없이 inf 가 된다. json.dumps 가 그걸 Infinity 로

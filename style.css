@@ -16,6 +16,24 @@ table { width:100%; border-collapse:collapse; font-size:.9rem; }
 th, td { border-bottom:1px solid var(--line); padding:6px 4px; text-align:right; white-space:nowrap; }
 th:first-child, td:first-child { text-align:left; }
 .up { color:var(--up); } .down { color:var(--down); }
+/* Task 15: 고치기 버튼 - 새 열을 만들지 않고 종목명 칸(첫 열) 안에 붙인다.
+   375px 가로 스크롤 표에서 열을 하나 더 늘리면 중요한 숫자들이 더 밀려난다
+   (구현계획.md 리뷰). <td> 자체에 display:flex 를 주지 않는다 — 브라우저마다
+   table-cell 참여 여부가 갈릴 수 있는 지점이라(실측: 열 정렬은 유지됐지만
+   신뢰하고 싶지 않다), 안에 별도 div 를 하나 더 두고 그 div 에서만
+   flex 로 이름과 버튼을 나열한다. */
+.name-cell { display:flex; align-items:center; gap:6px; justify-content:space-between; }
+/* width:auto 가 꼭 필요하다 — 아래 600px 이하 미디어쿼리가 `button` 을
+   전부 100% 폭으로 늘리는데, 그 규칙은 원래 폼 하단의 제출/취소 버튼을
+   겨눈 것이다. 이 선택자로 막지 않으면 표 셀 안의 버튼도 같이 늘어나
+   버튼 폭이 249px 까지 부풀고 다음 열(매입가) 위로 겹쳐 그린다(375px
+   실측으로 발견 — getBoundingClientRect 로 확인, 화면으로는 안 보일
+   수도 있는 종류의 결함이라 반드시 실측해야 했다). */
+.amend-btn { font-size:.75rem; padding:2px 6px; flex-shrink:0; width:auto; }
+#cancel-btn { background:transparent; }
+/* amend 모드 배지는 매도 모드(--down)와 시각적으로 구분한다 - "판매 중"이
+   아니라 "편집 중"이라는 다른 의미이므로 같은 색을 쓰면 헷갈린다. */
+#form[data-mode="amend"] .mode { background:var(--dim); }
 #summary { display:flex; flex-wrap:wrap; gap:12px; margin-top:12px; }
 #summary div { border:1px solid var(--line); border-radius:6px; padding:8px 12px; }
 form { display:flex; flex-wrap:wrap; gap:8px; align-items:flex-end; }

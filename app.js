@@ -280,8 +280,11 @@ function rows(state, quotes) {
 
     // status 와 exits 가 서로 다른 이야기를 할 수 있다(항목 8) —
     // apply_sell() 은 둘을 원자적으로 같이 바꾸므로 정상 경로에서는 절대
-    // 어긋나지 않지만, positions.json 은 amend 연산이 없어 손편집이
-    // 유일한 수리 경로다(구현계획.md 코드리뷰 이월). 손편집으로
+    // 어긋나지 않는다. amend(Task 15, scripts/models.py apply_amend)가
+    // 생긴 뒤에도 이 어긋남 자체는 amend 로 못 고친다 — status 는 amend
+    // 화이트리스트 밖이라 아예 못 바꾸고, exits 도 amend 로는 새로 못
+    // 만들고 못 지운다(이미 있는 exits[0] 의 price/date/reason 만 고칠 수
+    // 있다). 그래서 손편집이 여전히 유일한 수리 경로다. 손편집으로
     //   (a) status="closed" 인데 exits=[] (매도 기록을 빠뜨림), 또는
     //   (b) exits 는 있는데 status="open" 로 남음(되돌리는 걸 잊음)
     // 이 생길 수 있다. (a)를 무시하고 종전처럼 "오늘까지 보유"를 계산하면
@@ -339,6 +342,41 @@ function cell(tr, text, cls) {
   tr.appendChild(td);
 }
 
+// 종목명 칸 — Task 15 "고치기" 버튼을 여기 얹는다. 새 열을 만들지 않고
+// 기존 첫 열 안에 이름과 버튼을 나란히 둔다(375px 가로 스크롤 표에서
+// 열을 늘리면 중요한 숫자들이 더 밀려난다 — 구현계획.md 리뷰). 이름은
+// createElement + textContent 로만 넣는다(innerHTML 금지, 종목명이 DOM에
+// 닿는 가장 위험한 지점).
+//
+// 버튼은 r.bad(읽을 수 없는 기록)이거나 id 가 없는 기록에는 안 붙인다 —
+// bad 기록은 어차피 이 파일 전체가 intake.py 의 최상위 손상 가드에
+// 걸려 어떤 op 도 반영될 수 없다(정상 기록까지 포함해서). "고치기"를
+// 눌러 이슈를 열어도 절대 반영될 수 없는 버튼을 보여주는 것보다,
+// 아예 안 보여주는 쪽이 정직하다.
+function nameCell(tr, r, mark) {
+  // <td> 자체는 손대지 않는다 — 일반 table-cell 로 남겨 다른 열과 같은
+  // 폭 협상 규칙을 그대로 따르게 하고, flex 는 안에 넣는 별도 div 에만
+  // 준다(style.css .name-cell 옆 주석 — <td> 에 직접 display:flex 를
+  // 주면 브라우저별로 table-cell 참여 여부가 갈릴 수 있는 지점이다).
+  const td = document.createElement("td");
+  const wrap = document.createElement("div");
+  wrap.className = "name-cell";
+  const span = document.createElement("span");
+  span.textContent = (r.p.name || r.p.code || "?") + mark;
+  wrap.appendChild(span);
+  if (!r.bad && typeof r.p.id === "string" && r.p.id) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "amend-btn";
+    btn.textContent = "고치기";
+    btn.dataset.id = r.p.id;
+    btn.setAttribute("aria-label", "고치기: " + (r.p.name || r.p.code || "?"));
+    wrap.appendChild(btn);
+  }
+  td.appendChild(wrap);
+  tr.appendChild(td);
+}
+
 const fmt = n => n === null || n === undefined ? "-" : Math.round(n).toLocaleString("ko-KR");
 const fmtPct = n => n === null ? "-" : (n > 0 ? "+" : "") + n.toFixed(2) + "%";
 const cls = n => n === null ? "" : (n > 0 ? "up" : n < 0 ? "down" : "");
@@ -361,7 +399,7 @@ function renderTable(id, list) {
       if (r.halted) flags.push("거래정지");
       if (flags.length) mark = " (" + flags.join(", ") + ")";
     }
-    cell(tr, (r.p.name || r.p.code || "?") + mark);
+    nameCell(tr, r, mark);
     cell(tr, fmt(r.buy));
     cell(tr, fmt(r.now));
     cell(tr, fmtPct(r.ret), cls(r.ret));
@@ -563,6 +601,20 @@ let MASTER = [], NAMES = new Map(), STATE = { positions: [] }, QUOTES = {};
 let MASTER_PRICES = new Map();   // 코드 → 가격(있으면 int, 없으면 null) — 항목 18
 let masterLoadFailed = false;    // 제출 시 안내 문구를 바꾸는 데만 쓴다
 
+// Task 15: amend 모드 상태. null 이면 매입/매도 모드(#q 로 암묵 전환).
+// 값이 있으면 amend 모드 — #q 를 바꿔도 매입/매도로 되돌아가지 않고,
+// #cancel-btn 으로만 나간다. 이 객체는 "고치기"를 누른 시점의 스냅샷이다
+// (STATE 에서 읽은 값 — 재조회가 아니다). 그게 왜 맞는지는 buildAmendPatch
+// 옆 주석 참조(diff 기준을 뭘로 잡을지의 핵심 결정).
+let amendTarget = null;
+
+// KST 기준 "오늘" 문자열 하나로 통일한다 — main() 의 매입일 기본값과
+// exitAmendMode() 의 리셋이 서로 다른 계산을 하면 자정 근처에서 하루
+// 어긋날 수 있다.
+function kstTodayStr() {
+  return new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
+}
+
 function fillCandidates(q) {
   const dl = document.getElementById("cands");
   dl.textContent = "";
@@ -692,6 +744,305 @@ function updateMode() {
   applyMode(!!(code && findOpenPosition(code)));
 }
 
+// ── Task 15: amend 모드 ──────────────────────────────────────────────────
+
+function setExitFieldsVisible(v) {
+  document.getElementById("exit-price-field").hidden = !v;
+  document.getElementById("exit-date-field").hidden = !v;
+  document.getElementById("exit-reason-field").hidden = !v;
+}
+
+// #source 는 고정 5개 옵션 select 다(매입 모드는 항상 이 중 하나만 쓴다).
+// amend 로 고치는 기존 기록의 source 는 그 5개 밖의 임의 문자열일 수
+// 있다(models._text 는 20자 이하 문자열이면 뭐든 받는다 — 손편집이든,
+// 향후 다른 값이든). select 에 없는 값을 그냥 .value = x 로 넣으면
+// 브라우저는 선택을 못 만들고 빈 채로 남는다 — 그 상태로 diff 를 돌리면
+// "출처를 안 건드렸는데 ''로 바뀐 것"처럼 보여 source:"" 를 보내고,
+// 이건 서버에서 "수동"으로 리셋된다(구현계획.md 실측) — 손 안 댄 필드를
+// 지워버리는 바로 그 사고. 목록에 없는 값이면 임시 옵션을 추가해서
+// 진짜로 선택 가능하게 만든다.
+function setSourceSelectValue(value) {
+  const sel = document.getElementById("source");
+  const known = Array.from(sel.options).some(o => o.value === value);
+  if (!known) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = value;
+    opt.dataset.amendExtra = "1";
+    sel.appendChild(opt);
+  }
+  sel.value = value;
+}
+
+function clearExtraSourceOptions() {
+  document.getElementById("source").querySelectorAll('option[data-amend-extra="1"]')
+    .forEach(o => o.remove());
+}
+
+// amend 모드 진입 — applyMode(항목 7, buy/sell 전환)와 같은 요소들을 건드리되
+// 세 번째 상태로 확장한다(index.html 계약 참조). hasExit 이 false 면
+// exit-* 필드는 계속 숨겨둔다 — 대상 기록에 exits 가 없으면(status 가
+// 뭐라 되어 있든) apply_amend 가 exit 패치를 거부하므로, 폼에서부터
+// 낼 수 없는 값을 받지 않는다.
+function applyModeAmend(hasExit) {
+  const modeEl = document.getElementById("mode");
+  const label = document.getElementById("price-label");
+  const srcField = document.getElementById("source-field");
+  const form = document.getElementById("form");
+  const btn = document.getElementById("submit-btn");
+  modeEl.hidden = false;
+  modeEl.textContent = "고치기 — 기존 기록을 고치는 중입니다";
+  label.textContent = "매입가";
+  srcField.hidden = false;
+  form.dataset.mode = "amend";
+  btn.textContent = "고치기 반영";
+  document.getElementById("cancel-btn").hidden = false;
+  document.getElementById("signal-date-field").hidden = false;
+  setExitFieldsVisible(hasExit);
+}
+
+// "고치기" 버튼(renderTable/nameCell 이 만든다)의 위임 클릭 핸들러 — 표는
+// 매 렌더마다 tbody 를 통째로 비우므로(renderTable), 리스너는 살아있는
+// 상위 <table> 에 한 번만 건다.
+function onAmendButtonClick(e) {
+  const btn = e.target.closest(".amend-btn");
+  if (!btn) return;
+  startAmend(btn.dataset.id);
+}
+
+// id 로 STATE 에서 기록을 찾아 amend 폼을 채운다. **재조회하지 않는다** —
+// 이미 로드된 STATE 를 그대로 쓴다. 이게 diff 기준(어떤 필드를 "안 바뀜"
+// 으로 볼지)이 되어야 다음 문제를 피한다: 만약 여기서 다시 fetch 해서
+// 그 값으로 폼을 채우면, 그 사이(폼을 열고 제출하기 전) 다른 기기가 이
+// 기록의 다른 필드를 이미 고쳤을 때 — 사용자가 손대지 않은 그 필드가
+// 최신값과 달라 보여서 "바뀐 것"으로 오인되어 patch 에 실리고, 최신값을
+// 조용히 되돌려버린다(구현계획.md 가 지목한 "낡은 값을 되살리는" 실패
+// 모드). STATE 기준으로 채우면, 그 필드는 폼에도 여전히 옛 값이 그대로
+// 보이고 diff 도 "안 바뀜"으로 보여 patch 에서 빠진다 — 사용자가 안 만진
+// 필드를 결과적으로 안전하게 건드리지 않는다. 신원 확인(was/was_price)은
+// 여기서 하지 않는다 — 제출 직전 재조회(onAmendSubmit)가 그 몫이다.
+function startAmend(id) {
+  const p = STATE.positions.find(x => x.id === id);
+  if (!p || !isReadablePosition(p)) {
+    alert("이 기록은 형식이 올바르지 않아 고칠 수 없습니다.");
+    return;
+  }
+  let exitBaseline = null;
+  if (hasExitRecorded(p)) {
+    const e0 = p.exits[0];
+    // 저장된 exits[0] 자체가 손상됐으면(문자열 원소, price/date 누락 등 —
+    // 손편집으로만 가능) 그 값을 폼에 채울 수 없다. exit 필드를 숨긴 채
+    // 매수/종목/출처/메모/시그널일만 고칠 수 있게 한다 — apply_amend 도
+    // 이런 기록에서 exit 를 굳이 요구하지 않으면 손상 검사를 하지 않는다.
+    if (e0 && typeof e0.price === "number" && typeof e0.date === "string") {
+      exitBaseline = {
+        price: e0.price, date: e0.date,
+        reason: typeof e0.reason === "string" ? e0.reason : "",
+      };
+    }
+  }
+
+  amendTarget = {
+    id: p.id,
+    code: p.code,
+    // normalize() 의 기본값 규칙과 맞춘다 — 서버도 amend 적용 전에
+    // normalize() 를 거치므로, "현재 값"의 정의가 서로 달라 없는 필드를
+    // 있는 것처럼 보내는 일이 없게 한다.
+    name: p.name || p.code,
+    source: p.source || "수동",
+    memo: p.memo || "",
+    signalDate: p.signal_date || null,
+    buyPrice: p.buys[0].price,
+    buyDate: p.buys[0].date,
+    exit: exitBaseline,   // null 이면 이 amend 는 exit 를 건드릴 수 없다
+  };
+
+  clearExtraSourceOptions();
+  document.getElementById("q").value = amendTarget.name + " (" + amendTarget.code + ")";
+  document.getElementById("price").value = String(amendTarget.buyPrice);
+  document.getElementById("date").value = amendTarget.buyDate;
+  setSourceSelectValue(amendTarget.source);
+  document.getElementById("memo").value = amendTarget.memo;
+  document.getElementById("signal-date").value = amendTarget.signalDate || "";
+  if (exitBaseline) {
+    document.getElementById("exit-price").value = String(exitBaseline.price);
+    document.getElementById("exit-date").value = exitBaseline.date;
+    document.getElementById("exit-reason").value = exitBaseline.reason;
+  } else {
+    document.getElementById("exit-price").value = "";
+    document.getElementById("exit-date").value = "";
+    document.getElementById("exit-reason").value = "";
+  }
+
+  applyModeAmend(!!exitBaseline);
+
+  // adjustments 가 있는 기록은 표에 매입가/현재가/수익률이 전부 "-"로
+  // 보인다(항목 17 — 조정 방향을 판단할 근거가 없어 계산 자체를 건너뛴다).
+  // amend 는 adjustments 를 건드리지 않고, 여기 채운 매입가는 조정되지
+  // 않은 원본 저장값(p.buys[0].price)이다 — 표시값("-")과 다르게 보여
+  // 헷갈릴 수 있으니 그 사실을 그대로 알린다. 버튼 자체를 막지 않는 이유:
+  // code/name/source/memo/signal_date, 그리고 buy/exit 의 값 자체를
+  // 고치는 데는 adjustments 유무가 아무 영향이 없다 — 화면 파생값 계산만
+  // adjustments 때문에 보류된 것이지, 저장된 원본값은 이 기록도 다른
+  // 기록과 똑같이 정상이다.
+  if (Array.isArray(p.adjustments) && p.adjustments.length) {
+    document.getElementById("mode").textContent +=
+      " (액면조정 기록 있음 — 매입가는 조정 전 원본 저장값이며, 고치기는 조정값을 건드리지 않습니다)";
+  }
+
+  document.getElementById("form").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// amend 를 명시적으로 나간다(#cancel-btn, index.html 계약) — 매입/매도는
+// #q 로 암묵 전환되지만 amend 는 그렇지 않다(항목: "화면 - 지켜야 할 것").
+// 전부 매입 모드 기본값으로 되돌린다.
+function exitAmendMode() {
+  amendTarget = null;
+  clearExtraSourceOptions();
+  document.getElementById("q").value = "";
+  document.getElementById("price").value = "";
+  document.getElementById("date").value = kstTodayStr();
+  document.getElementById("source").value = "수동";
+  document.getElementById("memo").value = "";
+  document.getElementById("signal-date").value = "";
+  document.getElementById("exit-price").value = "";
+  document.getElementById("exit-date").value = "";
+  document.getElementById("exit-reason").value = "";
+  document.getElementById("signal-date-field").hidden = true;
+  document.getElementById("cancel-btn").hidden = true;
+  setExitFieldsVisible(false);
+  applyMode(false);
+  fillCandidates("");
+}
+
+// amendTarget(고치기를 누른 시점의 스냅샷) 과 현재 폼 값을 비교해 **바뀐
+// 필드만** 담은 patch 를 만든다(구현계획.md "안 고친 키는 아예 빼고
+// 보낸다" — patch 는 키의 유무로 판단하지 값이 비었는지로 판단하지
+// 않는다). code 는 바뀔 때만 name 과 함께 싣는다 — name 을 독립적으로
+// 고치는 입력란은 없다(#q 가 곧 종목 선택이다, applyMode 의 buy 모드와
+// 같은 설계). 반환값이 null 이면 검증 실패로 이미 alert 를 띄운 뒤다.
+function buildAmendPatch() {
+  const target = amendTarget;
+  const text = document.getElementById("q").value;
+  const code = resolveCode(text);
+  if (!code) {
+    alert(masterLoadFailed
+      ? "종목 목록을 불러오지 못해 코드를 확인할 수 없습니다. 새로고침 후 다시 시도해주세요."
+      : "종목을 목록에서 골라주세요.");
+    return null;
+  }
+  const price = parsePrice(document.getElementById("price").value);
+  const date = document.getElementById("date").value;
+  if (!(price > 0)) { alert("매입가를 확인해주세요."); return null; }
+  if (!date) { alert("매입일을 골라주세요."); return null; }
+
+  const patch = { op: "amend", id: target.id };
+
+  if (code !== target.code) {
+    patch.code = code;
+    patch.name = NAMES.get(code) || code;   // code 없이 name 만, name 없이 code 만 보내지 않는다
+  }
+
+  const buyPatch = {};
+  if (price !== target.buyPrice) buyPatch.price = price;
+  if (date !== target.buyDate) buyPatch.date = date;
+  if (Object.keys(buyPatch).length) patch.buy = buyPatch;
+
+  if (target.exit) {
+    const exitPrice_ = parsePrice(document.getElementById("exit-price").value);
+    const exitDate = document.getElementById("exit-date").value;
+    const exitReason = document.getElementById("exit-reason").value;
+    if (!(exitPrice_ > 0)) { alert("매도가를 확인해주세요."); return null; }
+    if (!exitDate) { alert("매도일을 골라주세요."); return null; }
+    const exitPatch = {};
+    if (exitPrice_ !== target.exit.price) exitPatch.price = exitPrice_;
+    if (exitDate !== target.exit.date) exitPatch.date = exitDate;
+    if (exitReason !== target.exit.reason) exitPatch.reason = exitReason;
+    if (Object.keys(exitPatch).length) patch.exit = exitPatch;
+  }
+
+  const source = document.getElementById("source").value;
+  if (source !== target.source) patch.source = source;
+  const memo = document.getElementById("memo").value;
+  if (memo !== target.memo) patch.memo = memo;
+  const sigVal = document.getElementById("signal-date").value;      // "" 또는 YYYY-MM-DD
+  const sigTarget = target.signalDate || "";
+  if (sigVal !== sigTarget) patch.signal_date = sigVal;   // "" 는 서버에서 null 로 정규화된다(models.apply_amend)
+
+  const changed = "code" in patch || "buy" in patch || "exit" in patch
+    || "source" in patch || "memo" in patch || "signal_date" in patch;
+  if (!changed) {
+    alert("바뀐 내용이 없습니다.");
+    return null;
+  }
+  return patch;
+}
+
+// amend 제출 — buy/sell(onSubmit)과 다른 경로다: 이슈 URL 을 만들기
+// 직전에 positions.json 을 다시 받는다(구현계획.md "화면 - 지켜야 할
+// 것" 1번, 이게 유일한 방어다). id 는 날짜+코드라서, 이 기록의 buy.date
+// 를 amend 로 옮기면 옛 id 가 비고, 그 사이 같은 코드로 정말 새 매수가
+// 그 자리를 다시 채우면 낡은 amend 이슈가 엉뚱한(새) 기록을 고칠 수
+// 있다 — was 코드 하나로는 못 막는다(같은 코드니까). was/was_price 는
+// 그래서 항상 이 재조회 결과에서 뽑는다 — buildAmendPatch 가 쓰는
+// amendTarget(폼을 연 시점의 스냅샷)에서 뽑지 않는다. load() 의 기본값이
+// 이미 cache:"no-store" + Date.now() 버스터라(app.js 파일 상단 load()
+// 정의 참조) 별도 옵션을 얹지 않아도 강제 재조회가 된다.
+async function onAmendSubmit(ev) {
+  ev.preventDefault();
+  const target = amendTarget;
+  if (!target) return;   // 방어적 — submit 리스너가 amendTarget 있을 때만 이걸 부른다
+
+  const patch = buildAmendPatch();
+  if (!patch) return;   // 이미 alert 로 이유를 알렸다
+
+  // 팝업 차단 대응 — onSubmit(매입/매도)은 "핸들러 안에서 await 없이
+  // 동기 호출"로 사용자 제스처를 지켜 팝업 차단을 피한다. 여기서는 그
+  // 트릭을 못 쓴다 — 아래 재조회(await load) 자체가 이 화면의 핵심
+  // 방어라 없앨 수 없다(점 1). 대신 제스처가 아직 살아있는 지금 빈 탭을
+  // 먼저 열어두고, 재조회가 끝나면 그 탭을 실제 URL로 돌린다.
+  // noopener 는 여기서 못 쓴다 — 쓰면 반환값이 null 이 되어 나중에 이
+  // 탭을 다시 찾을 방법이 없다. 목적지가 사용자 입력이 아니라 이 코드가
+  // 고정한 github.com 이슈 생성 URL 이라 opener 노출 위험은 낮다고
+  // 본다. 이 사전 오픈 자체가 막히면(pending=null) 아래에서 예전처럼
+  // 제출 시점에 한 번 더 시도하고, 그마저 막히면 현재 탭에서 이동한다.
+  const pending = window.open("", "_blank");
+
+  const fresh = await load("positions.json", { positions: [] }, { allow404: true });
+  if (!fresh.ok) {
+    if (pending) pending.close();
+    alert("최신 기록을 다시 불러오지 못했습니다 — 네트워크를 확인하고 다시 시도해주세요.");
+    return;
+  }
+  const freshMatch = (fresh.data.positions || []).find(p => p.id === target.id);
+  if (!freshMatch || !isReadablePosition(freshMatch)) {
+    // 점 4 — 재조회한 파일에 더 이상 이 기록이 없다(다른 기기에서 이미
+    // 고쳤거나, id 가 바뀌었거나). 낡은 was/was_price 로 이슈를 열면
+    // 엉뚱한 기록을 겨눌 수 있으니 여기서 멈춘다 — 새로고침을 안내한다.
+    if (pending) pending.close();
+    alert("이 기록을 더 이상 찾을 수 없습니다 — 다른 곳에서 이미 고쳐졌거나 삭제된 것 같습니다. "
+      + "새로고침 후 다시 확인해주세요.");
+    return;
+  }
+  patch.was = freshMatch.code;
+  patch.was_price = freshMatch.buys[0].price;
+
+  const displayName = patch.name || freshMatch.name || freshMatch.code;
+  const url = issueUrl("AMEND " + displayName, patch);
+  if (pending) {
+    pending.location.href = url;
+  } else {
+    const win = window.open(url, "_blank", "noopener");
+    if (!win) location.href = url;
+  }
+
+  // 점 7 — 사용자는 이슈만 새 탭에서 열었을 뿐 표는 아직 이전 값이다.
+  // 워크플로가 반영할 때까지 몇 분 걸릴 수 있는데 화면이 아무 말도 안
+  // 하면 "눌렀는데 왜 안 바뀌지"로 이어진다. 정직하게 남긴다.
+  addStaleMessage("방금 고치기 이슈를 새 탭에서 열었습니다 — 깃허브에서 제출을 완료하면 반영에 몇 분 "
+    + "걸릴 수 있습니다. 이 표는 아직 이전 값을 보여주고 있으니, 나중에 새로고침해서 확인해주세요.");
+}
+
 function issueUrl(title, payload) {
   const body = "모의고사 입력\n\n```json\n" + JSON.stringify(payload) + "\n```";
   return REPO + "/issues/new?title=" + encodeURIComponent(title)
@@ -744,17 +1095,26 @@ function onSubmit(ev) {
 
 document.getElementById("q").addEventListener("input", e => {
   fillCandidates(e.target.value);
-  updateMode();
+  // amend 모드 중에는 #q 를 바꿔도 매입/매도 자동판정으로 돌아가지 않는다
+  // (Task 15 — amend 는 버튼으로만 들어오고 #cancel-btn 으로만 나간다).
+  if (!amendTarget) updateMode();
 });
-document.getElementById("form").addEventListener("submit", onSubmit);
+document.getElementById("form").addEventListener("submit", ev => {
+  if (amendTarget) { onAmendSubmit(ev); return; }
+  onSubmit(ev);
+});
+document.getElementById("cancel-btn").addEventListener("click", exitAmendMode);
+document.getElementById("open").addEventListener("click", onAmendButtonClick);
+document.getElementById("closed").addEventListener("click", onAmendButtonClick);
 
 (async function main() {
   // KST 기준 "오늘" 문자열 — master.json 캐시버스터(하루 한 번만 바뀌면
   // 됨)와 매입일 기본값(아래) 둘 다에 쓴다. 기기 로캘에 기대지 않고
   // UTC+9 를 명시적으로 더한다 — 파이썬 쪽 KST = timezone(timedelta(hours=9))
   // 와 같은 근거. Date.now()+9시간은 항상 파싱 가능한 10자리 문자열을
-  // 내므로 이 값 자체가 비어있을 일은 없다.
-  const kstToday = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
+  // 내므로 이 값 자체가 비어있을 일은 없다. (Task 15: exitAmendMode() 도
+  // 같은 계산을 써야 해서 kstTodayStr() 로 뽑아냈다 — 아래는 그 호출.)
+  const kstToday = kstTodayStr();
 
   // positions.json·quotes.json 만 먼저 받는다 — 표를 그리는 데 필요한
   // 전부다. master.json(207KB)은 자동완성에만 쓰이므로 이 Promise.all

@@ -259,3 +259,61 @@ def test_저장된_사다리를_쓴다(monkeypatch):
     assert rc == 0
     p = fake.writes[0][1]["positions"][0]
     assert p["buys"][1]["price"] == 95000   # 기본값 94,000 이 아니다
+
+
+# ── Task 12: 지정가 관찰(pending) — 목표가에 닿으면 1차 매수로 체결된다 ─────
+
+
+def _pending(**over):
+    p = {"id": "20260820-005930", "code": "005930", "name": "삼성전자",
+         "buys": [], "exits": [], "adjustments": [], "status": "pending",
+         "source": "종가베팅", "memo": "", "signal_date": None,
+         "watch": {"price": 240000, "date": "2026-08-20"},
+         "orders": {}, "auto": True, "observed_at": None}
+    p.update(over)
+    return p
+
+
+def test_지정가에_닿으면_체결하고_같은_실행에서_사다리까지_이어간다(monkeypatch):
+    """같은 날 매수·매도가 나는 경우를 다음 실행으로 미루면 그만큼 분봉
+    창(7거래일)을 까먹는다."""
+    fake = FakeGH({"schema": 1, "positions": [_pending()]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute", lambda code, day: [
+        {"t": "202608210900", "high": 245000, "low": 241000},
+        {"t": "202608210931", "high": 241000, "low": 239000},   # 240,000 터치
+        {"t": "202608211000", "high": 242000, "low": 240000},
+    ])
+    rc = autofill.run({"005930": {"20260821": {"high": 245000, "low": 239000}}},
+                      "2026-08-21")
+    assert rc == 0
+    p = fake.state["positions"][0]
+    assert p["status"] == "open"
+    assert p["buys"][0]["price"] == 240000
+    assert p["buys"][0]["t"] == "202608210931"
+    assert p["observed_at"] == "2026-08-21T09:31"
+
+
+def test_지정가에_안_닿으면_pending_그대로다(monkeypatch):
+    calls = []
+    fake = FakeGH({"schema": 1, "positions": [_pending()]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute",
+                        lambda code, day: calls.append(code) or [])
+    rc = autofill.run({"005930": {"20260821": {"high": 250000, "low": 245000}}},
+                      "2026-08-21")
+    assert rc == 0
+    assert calls == [], "일봉 저가가 목표가 위인데 분봉을 받았다"
+    assert fake.writes == []
+
+
+def test_예외_지정된_pending_은_체결되지_않는다(monkeypatch):
+    """예외는 자동매도뿐 아니라 자동매수도 멈춘다(설계 §8)."""
+    fake = FakeGH({"schema": 1, "positions": [_pending(auto=False)]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute", lambda code, day: [
+        {"t": "202608210931", "high": 241000, "low": 239000}])
+    rc = autofill.run({"005930": {"20260821": {"high": 245000, "low": 239000}}},
+                      "2026-08-21")
+    assert rc == 0
+    assert fake.writes == []

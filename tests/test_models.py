@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import pytest
 from scripts import models
+from scripts import orders
 
 
 def test_빈_상태를_만든다():
@@ -1100,16 +1101,17 @@ def test_멀쩡한_orders_는_통과한다(ok):
 
 
 def test_buys가_없으면_1차가_대조는_건너뛴다():
-    """지정가 관찰(뒤 태스크)은 아직 안 산 기록이라 1차가와 대조할 게 없다.
+    """지정가 관찰(Task 12)은 아직 안 산 기록이라 1차가와 대조할 게 없다.
     그래도 사다리 자체의 모양(정수·순서)은 본다."""
     dropped = []
     st = models.normalize({"schema": 1, "positions": [{
         "code": "005930", "buys": [], "status": "pending",
         "orders": {"buy2": 94000, "buy3": 88000}}]}, dropped)
-    # buys 가 비어 있으면 현재 normalize 는 그 자체로 격리한다(pending 은
-    # 아직 도입 전) — 여기서 확인하는 건 orders 검증이 KeyError 를 내지
-    # 않는다는 것뿐이다.
-    assert isinstance(dropped, list)
+    # pending 은 buys 가 비어 있어도 더 이상 격리되지 않는다(Task 12) —
+    # 여기서 확인하는 건 orders 검증이 buys[0] 대조를 건너뛰고도(빈
+    # 리스트라 대조할 첫 매수가가 없다) KeyError 없이 통과한다는 것이다.
+    assert len(st["positions"]) == 1
+    assert dropped == []
 
 
 # ── Task 9: buys[1:](자동 체결)도 buys[0] 와 같은 기준으로 본다 ──────────
@@ -1279,3 +1281,90 @@ def test_auto_가_불리언_아니면_토글을_거부한다():
     with pytest.raises(models.RejectedError):
         models.apply_auto(st, {"op": "auto", "id": "20260820-005930",
                                "was": "005930", "auto": "false"})
+
+
+# ── Task 12: 지정가 관찰 (op: watch) ────────────────────────────────────────
+
+
+def test_지정가_관찰은_pending_으로_들어간다():
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000, "source": "종가베팅"})
+    p = st["positions"][0]
+    assert p["status"] == "pending"
+    assert p["buys"] == []
+    assert p["watch"] == {"price": 240000, "date": "2026-08-20"}
+
+
+def test_pending_은_normalize_를_통과한다():
+    """buys 가 비어 있어도 격리되면 안 된다 — 아직 안 산 기록이다."""
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [], "status": "pending",
+        "watch": {"price": 240000, "date": "2026-08-20"}}]})
+    assert len(st["positions"]) == 1
+
+
+def test_pending_이_아닌데_buys가_비면_여전히_격리한다():
+    """pending 예외가 정상 기록의 손상까지 통과시키면 안 된다."""
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [], "status": "open"}]}, dropped)
+    assert st["positions"] == []
+    assert len(dropped) == 1
+
+
+def test_pending_이_체결되면_1차_매수가_된다():
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000})
+    st = models.apply_watch_fill(st, "20260820-005930", "2026-08-21",
+                                 "202608210931")
+    p = st["positions"][0]
+    assert p["status"] == "open"
+    assert p["buys"] == [{"date": "2026-08-21", "price": 240000,
+                          "kind": "buy1", "t": "202608210931", "auto": True}]
+    assert p["orders"]["customized"] is False
+    assert p["observed_at"] == "2026-08-21T09:31"
+
+
+def test_체결된_pending_의_사다리도_호가에_맞는다():
+    """240,000원의 -6%/-12% 는 225,600 / 211,200 인데, 그 가격대 호가단위가
+    500원이라 그대로는 주문할 수 없다 — plan() 이 내림 처리한다."""
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000})
+    st = models.apply_watch_fill(st, "20260820-005930", "2026-08-21", "202608210931")
+    o = st["positions"][0]["orders"]
+    assert o == {**orders.plan(240000), "customized": False}
+    for k in ("buy2", "buy3"):
+        assert o[k] % orders.tick_size(o[k]) == 0
+
+
+def test_체결된_pending_기록은_normalize_를_그대로_통과한다():
+    """apply_watch_fill 이 만든 것을 normalize 가 격리하면 최악이다 —
+    체결은 됐는데 다음 읽기에서 사라진다(apply_buy 와 같은 위험)."""
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000})
+    st = models.apply_watch_fill(st, "20260820-005930", "2026-08-21", "202608210931")
+    dropped = []
+    assert len(models.normalize(st, dropped)["positions"]) == 1
+    assert dropped == []
+
+
+@pytest.mark.parametrize("price", [1, 5, 8, 12])
+def test_사다리를_만들_수_없는_싼_종목은_관찰도_거부한다(price):
+    """apply_buy 와 같은 이유 — 체결 시점에 만들 사다리가 normalize 를
+    통과 못 하면, 체결은 되는데 기록이 사라진다. 문 앞에서 막는다."""
+    with pytest.raises(models.RejectedError):
+        models.apply_watch(models.empty_state(), {
+            "op": "watch", "code": "005930", "date": "2026-08-20", "price": price})
+
+
+def test_이미_체결된_대기주문은_다시_체결되지_않는다():
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000})
+    st = models.apply_watch_fill(st, "20260820-005930", "2026-08-21", "202608210931")
+    with pytest.raises(models.RejectedError):
+        models.apply_watch_fill(st, "20260820-005930", "2026-08-22", "202608220931")

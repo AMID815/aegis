@@ -30,7 +30,7 @@ SCHEMA = 1
 # 남겨둘 이유가 없어 함께 고쳤다.
 CODE_RE = re.compile(r"^[0-9A-Z]{6}\Z")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
-OPEN, CLOSED = "open", "closed"
+OPEN, CLOSED, PENDING = "open", "closed", "pending"
 
 
 class RejectedError(Exception):
@@ -214,8 +214,17 @@ def normalize(raw, dropped=None) -> dict:
             if dropped is not None:
                 dropped.append(p)
             continue
+        # pending(지정가 관찰)은 아직 안 산 기록이라 buys 가 비어 있다 —
+        # 그걸 손상으로 보고 격리하면 대기 주문이 통째로 사라진다. 반대로
+        # pending 이 아닌데 비어 있으면 여전히 손상이다(얼마에 샀는지조차
+        # 모르는 기록).
+        is_pending = p.get("status") == PENDING
         buys = p.get("buys")
-        if not isinstance(buys, list) or not buys or not isinstance(buys[0], dict):
+        if not isinstance(buys, list):
+            if dropped is not None:
+                dropped.append(p)
+            continue
+        if not is_pending and not buys:
             if dropped is not None:
                 dropped.append(p)
             continue
@@ -229,7 +238,7 @@ def normalize(raw, dropped=None) -> dict:
             continue
         # status 는 setdefault 이전, 원본 그대로 검사한다. dropped 페이로드에 id 등
         # 합성된 키가 섞여 들어가면 "파일에 있던 것"이라는 보고 취지가 깨진다.
-        if p.get("status", OPEN) not in (OPEN, CLOSED):   # 거래정지/상장폐지는 시세 쪽 파생 상태이지 여기 값이 아니다
+        if p.get("status", OPEN) not in (OPEN, CLOSED, PENDING):   # 거래정지/상장폐지는 시세 쪽 파생 상태이지 여기 값이 아니다
             if dropped is not None:
                 dropped.append(p)
             continue
@@ -275,7 +284,10 @@ def normalize(raw, dropped=None) -> dict:
             if dropped is not None:
                 dropped.append(p)
             continue
-        p.setdefault("id", f"{p['buys'][0]['date'].replace('-', '')}-{p['code']}")
+        # pending 은 buys 가 비어 있어 매수일로 id 를 못 만든다 — watch.date 를 쓴다.
+        _idbase = (p["buys"][0]["date"] if p.get("buys")
+                   else (p.get("watch") or {}).get("date", "0000-00-00"))
+        p.setdefault("id", f"{_idbase.replace('-', '')}-{p['code']}")
         p.setdefault("name", p["code"])
         p.setdefault("signal_date", None)
         p.setdefault("exits", [])
@@ -337,6 +349,62 @@ def apply_buy(state: dict, req: dict) -> dict:
         "auto": True,
         "memo": _text(req.get("memo"), 200, default=""),
     })
+    return state
+
+
+def apply_watch(state: dict, req: dict) -> dict:
+    """지정가 관찰 — 그 가격에 닿을 때 1차 매수가 체결되는 대기 기록.
+
+    아직 아무것도 안 샀으므로 `buys` 는 비어 있고 `status` 는 "pending"
+    이다. 체결되면 apply_watch_fill 이 1차 매수로 바꾸고 그 시점에
+    2차·3차 지정가를 확정한다(설계 §7).
+    """
+    code = _code(req.get("code"))
+    date = _date(req.get("date"))
+    price = _price(req.get("price"))
+    # 체결 시점에 만들 사다리가 normalize 를 통과 못 하면, 체결은 되는데
+    # 그 기록이 다음 읽기에서 사라진다(apply_buy 와 같은 위험). 여기서 막는다.
+    if not _orders_sane({**_orders.plan(price), "customized": False},
+                        [{"date": date, "price": price}]):
+        raise RejectedError(f"목표가가 너무 낮아 지정가 사다리를 만들 수 없음: {price}원")
+    pid = f"{date.replace('-', '')}-{code}"
+    state = normalize(state)
+    if any(p["id"] == pid for p in state["positions"]):
+        raise AlreadyApplied(pid)
+    state["positions"].append({
+        "id": pid, "code": code,
+        "name": _text(req.get("name"), 40, default=code),
+        "source": _text(req.get("source"), 20, default="수동", strict=True),
+        "signal_date": None,
+        "buys": [], "exits": [], "adjustments": [],
+        "status": PENDING,
+        "watch": {"price": price, "date": date},
+        "orders": {}, "observed_at": None, "auto": True,
+        "memo": _text(req.get("memo"), 200, default=""),
+    })
+    return state
+
+
+def apply_watch_fill(state: dict, pid: str, day: str, t: str) -> dict:
+    """대기 주문이 체결됐다 — 1차 매수로 바꾸고 2차·3차를 확정한다.
+
+    `observed_at` 을 체결 시각으로 둔다. 이 기록의 "관측"은 지정가에 닿은
+    그 순간이므로, 이후 재생은 거기서부터 시작해야 맞다(설계 §5) — 같은
+    실행에서 곧바로 이어지는 물타기·익절 판정이 체결 이전 분봉을 보면
+    안 된다.
+    """
+    state = normalize(state)
+    match = next((p for p in state["positions"] if p["id"] == pid), None)
+    if match is None:
+        raise RejectedError(f"대상 없음: {pid!r}")
+    if match["status"] != PENDING:
+        raise RejectedError(f"대기 상태가 아님: {pid!r}")
+    price = _price(match["watch"]["price"])
+    match["buys"] = [{"date": _date(day), "price": price,
+                      "kind": "buy1", "t": t, "auto": True}]
+    match["orders"] = {**_orders.plan(price), "customized": False}
+    match["observed_at"] = f"{day}T{t[8:10]}:{t[10:12]}"
+    match["status"] = OPEN
     return state
 
 

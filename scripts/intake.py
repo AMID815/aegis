@@ -99,6 +99,8 @@ def apply(state: dict, req: dict, changed_id: list | None = None) -> dict:
         return models.apply_orders(state, req)
     if op == "auto":
         return models.apply_auto(state, req)
+    if op == "watch":
+        return models.apply_watch(state, req)
     raise models.RejectedError(f"모르는 op: {op!r}")
 
 

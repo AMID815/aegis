@@ -30,7 +30,7 @@ SCHEMA = 1
 # 남겨둘 이유가 없어 함께 고쳤다.
 CODE_RE = re.compile(r"^[0-9A-Z]{6}\Z")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
-OPEN, CLOSED, PENDING = "open", "closed", "pending"
+OPEN, CLOSED, PENDING, EXPIRED = "open", "closed", "pending", "expired"
 
 
 class RejectedError(Exception):
@@ -114,6 +114,57 @@ def _orders_sane(ords: dict, buys: list) -> bool:
         if isinstance(first, int) and ords["buy2"] >= first:
             return False   # 2차가 1차보다 높으면 매수 즉시 체결된다
     if "customized" in ords and not isinstance(ords["customized"], bool):
+        return False
+    return True
+
+
+def _watch_days(v):
+    """지정가 관찰의 기한(거래일 수) — 없으면 기본 3, 있으면 1~60 사이의
+    진짜 정수만 받는다.
+
+    상한 60 은 "60거래일이면 분 단위로 정확하다"는 보장이 아니다 —
+    분봉 재생 창은 약 7거래일뿐이고, 그 뒤로도 autofill 은 일봉만으로
+    계속 판정할 수 있지만(분봉이 없으면 그 종목만 건너뛴다) 분 단위
+    정밀도를 잃는다. 60 은 그 사실을 인지한 넉넉한 안전 상한일 뿐이다.
+
+    bool 은 파이썬에서 int 의 서브클래스라 `isinstance(True, int)` 가
+    참이다 — 명시적으로 막지 않으면 `days: true` 가 1거래일짜리 관찰로
+    조용히 통과한다.
+    """
+    if v is None:
+        return 3
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise RejectedError(f"관찰 기간이 정수가 아님: {v!r}")
+    if not (1 <= v <= 60):
+        raise RejectedError(f"관찰 기간이 범위를 벗어남(1~60): {v!r}")
+    return v
+
+
+def _watch_sane(w) -> bool:
+    """저장된 지정가 관찰(watch)이 쓸 수 있는 모양인가 — normalize 전용 검사.
+
+    `_orders_sane` 의 buy2/buy3 검사와 같은 스타일(정수·양수·bool 아님)을
+    쓴다 — `watch.price` 는 apply_watch_fill 이 그대로 체결가로 쓰고,
+    `watch.days` 는 이 기록이 언제 만료되는지(apply_expire 의 판단 근거)를
+    통제한다. 손편집된 값이 조용히 통과하면 전자는 가격을, 후자는
+    "영원히 안 만료됨" 같은 사고를 만든다 — `_orders_sane` 옆 주석이 든
+    이유와 같다.
+
+    `expired_on`(apply_expire 가 덧붙이는 필드) 은 여기서 검사하지 않는다
+    — `_orders_sane` 이 `customized` 를 별도로만 보듯, 이 함수는 만료
+    여부와 무관하게 항상 있어야 하는 세 필드(price/date/days)만 본다.
+    """
+    if not isinstance(w, dict):
+        return False
+    price = w.get("price")
+    if isinstance(price, bool) or not isinstance(price, int) or price <= 0:
+        return False
+    try:
+        _date(w.get("date"))
+    except RejectedError:
+        return False
+    days = w.get("days")
+    if isinstance(days, bool) or not isinstance(days, int) or not (1 <= days <= 60):
         return False
     return True
 
@@ -214,17 +265,17 @@ def normalize(raw, dropped=None) -> dict:
             if dropped is not None:
                 dropped.append(p)
             continue
-        # pending(지정가 관찰)은 아직 안 산 기록이라 buys 가 비어 있다 —
-        # 그걸 손상으로 보고 격리하면 대기 주문이 통째로 사라진다. 반대로
-        # pending 이 아닌데 비어 있으면 여전히 손상이다(얼마에 샀는지조차
-        # 모르는 기록).
-        is_pending = p.get("status") == PENDING
+        # pending(지정가 관찰)과 expired(그 관찰이 기한을 넘겨 만료됨)는
+        # 둘 다 아직 안 산 기록이라 buys 가 비어 있다 — 그걸 손상으로 보고
+        # 격리하면 대기 주문/만료 기록이 통째로 사라진다. 반대로 둘 다
+        # 아닌데 비어 있으면 여전히 손상이다(얼마에 샀는지조차 모르는 기록).
+        never_bought = p.get("status") in (PENDING, EXPIRED)
         buys = p.get("buys")
         if not isinstance(buys, list):
             if dropped is not None:
                 dropped.append(p)
             continue
-        if not is_pending and not buys:
+        if not never_bought and not buys:
             if dropped is not None:
                 dropped.append(p)
             continue
@@ -238,7 +289,22 @@ def normalize(raw, dropped=None) -> dict:
             continue
         # status 는 setdefault 이전, 원본 그대로 검사한다. dropped 페이로드에 id 등
         # 합성된 키가 섞여 들어가면 "파일에 있던 것"이라는 보고 취지가 깨진다.
-        if p.get("status", OPEN) not in (OPEN, CLOSED, PENDING):   # 거래정지/상장폐지는 시세 쪽 파생 상태이지 여기 값이 아니다
+        if p.get("status", OPEN) not in (OPEN, CLOSED, PENDING, EXPIRED):   # 거래정지/상장폐지는 시세 쪽 파생 상태이지 여기 값이 아니다
+            if dropped is not None:
+                dropped.append(p)
+            continue
+        # watch 는 pending/expired 일 때만 의미가 있다(체결되고 나면
+        # apply_watch_fill 이 status 는 OPEN 으로 바꾸지만 watch 필드
+        # 자체는 남겨둔다 — "무엇을 지정했었는지"의 기록으로). 이미 체결된
+        # 기록의 낡은 watch 는 더 이상 아무 것도 통제하지 않으므로(가격도
+        # 기한도 다시 쓰이지 않는다) 여기서 검증하지 않는다 — 검증하면,
+        # 이 필드가 생기기 전(days 없이 {price, date} 두 키만 있던 시절)에
+        # 이미 체결까지 끝난 옛 기록들이 오늘부로 전부 격리당한다.
+        # 반대로 pending/expired 는 watch.price 가 그대로 체결가로 쓰이고
+        # (apply_watch_fill) watch.days 가 만료 여부를 가르므로(apply_expire
+        # 호출부, autofill.run) 손편집된 값을 여기서 반드시 걸러야 한다 —
+        # `_orders_sane` 을 이미 체결된 기록에만 적용하는 것과 대칭이다.
+        if never_bought and not _watch_sane(p.get("watch")):
             if dropped is not None:
                 dropped.append(p)
             continue
@@ -358,10 +424,19 @@ def apply_watch(state: dict, req: dict) -> dict:
     아직 아무것도 안 샀으므로 `buys` 는 비어 있고 `status` 는 "pending"
     이다. 체결되면 apply_watch_fill 이 1차 매수로 바꾸고 그 시점에
     2차·3차 지정가를 확정한다(설계 §7).
+
+    "며칠 이내에 N원에 닿으면 자동 매수" — `days`(거래일 수, 기본 3)가
+    그 "며칠 이내에"다. 기한은 여기서 계산하지 않는다 — `watch.date` 와
+    `watch.days` 를 그대로 저장해두고, 매일 판정은 autofill.run 이
+    trading_calendar.watch_deadline 으로 한다(달력일이 아니라 거래일로
+    세야 하므로, 이 함수 시점엔 아직 그 뒤로 며칠이 거래일인지 알 수
+    없다 — 판정을 미루는 게 아니라 애초에 여기서 할 수 있는 계산이
+    아니다).
     """
     code = _code(req.get("code"))
     date = _date(req.get("date"))
     price = _price(req.get("price"))
+    days = _watch_days(req.get("days"))
     # 체결 시점에 만들 사다리가 normalize 를 통과 못 하면, 체결은 되는데
     # 그 기록이 다음 읽기에서 사라진다(apply_buy 와 같은 위험). 여기서 막는다.
     if not _orders_sane({**_orders.plan(price), "customized": False},
@@ -378,7 +453,7 @@ def apply_watch(state: dict, req: dict) -> dict:
         "signal_date": None,
         "buys": [], "exits": [], "adjustments": [],
         "status": PENDING,
-        "watch": {"price": price, "date": date},
+        "watch": {"price": price, "date": date, "days": days},
         "orders": {}, "observed_at": None, "auto": True,
         "memo": _text(req.get("memo"), 200, default=""),
     })
@@ -405,6 +480,32 @@ def apply_watch_fill(state: dict, pid: str, day: str, t: str) -> dict:
     match["orders"] = {**_orders.plan(price), "customized": False}
     match["observed_at"] = f"{day}T{t[8:10]}:{t[10:12]}"
     match["status"] = OPEN
+    return state
+
+
+def apply_expire(state: dict, pid: str, day: str) -> dict:
+    """대기 주문이 기한(watch.days 거래일)을 넘겨 안 닿았다 — 매수 없이
+    끝난다.
+
+    "이 스크리너의 신호가 목표가에 안 닿았다"는 그 자체로 유효한 결과다
+    (지시문 결정 4) — 지우면 스크리너 비교가 그 실패를 못 본 척하게
+    된다. 그래서 지우지 않고 `status` 만 EXPIRED 로 바꾼다. `buys` 는
+    계속 비어 있다(끝내 안 샀다) — 화면(rows())이 이 상태를 승률·평균
+    수익률·미결 어디에도 안 들어가게 따로 뺀다.
+
+    `watch.expired_on` 에 만료가 확정된 날짜를 남긴다 — price/date/days
+    는 그대로 둔다(무엇을 노렸다가 놓쳤는지가 계속 읽혀야 한다). 이
+    함수를 부르는 쪽(autofill.run)에게 "만료도 쓰기"라는 사실을 그대로
+    노출한다 — 그래야 그 실패가 다른 쓰기 실패와 같은 problems 경로로 들어간다.
+    """
+    state = normalize(state)
+    match = next((p for p in state["positions"] if p["id"] == pid), None)
+    if match is None:
+        raise RejectedError(f"대상 없음: {pid!r}")
+    if match["status"] != PENDING:
+        raise RejectedError(f"대기 상태가 아님: {pid!r}")
+    match["watch"] = {**match["watch"], "expired_on": _date(day)}
+    match["status"] = EXPIRED
     return state
 
 

@@ -1106,6 +1106,7 @@ def test_buys가_없으면_1차가_대조는_건너뛴다():
     dropped = []
     st = models.normalize({"schema": 1, "positions": [{
         "code": "005930", "buys": [], "status": "pending",
+        "watch": {"price": 240000, "date": "2026-08-20", "days": 3},
         "orders": {"buy2": 94000, "buy3": 88000}}]}, dropped)
     # pending 은 buys 가 비어 있어도 더 이상 격리되지 않는다(Task 12) —
     # 여기서 확인하는 건 orders 검증이 buys[0] 대조를 건너뛰고도(빈
@@ -1293,14 +1294,14 @@ def test_지정가_관찰은_pending_으로_들어간다():
     p = st["positions"][0]
     assert p["status"] == "pending"
     assert p["buys"] == []
-    assert p["watch"] == {"price": 240000, "date": "2026-08-20"}
+    assert p["watch"] == {"price": 240000, "date": "2026-08-20", "days": 3}
 
 
 def test_pending_은_normalize_를_통과한다():
     """buys 가 비어 있어도 격리되면 안 된다 — 아직 안 산 기록이다."""
     st = models.normalize({"schema": 1, "positions": [{
         "code": "005930", "buys": [], "status": "pending",
-        "watch": {"price": 240000, "date": "2026-08-20"}}]})
+        "watch": {"price": 240000, "date": "2026-08-20", "days": 3}}]})
     assert len(st["positions"]) == 1
 
 
@@ -1368,3 +1369,130 @@ def test_이미_체결된_대기주문은_다시_체결되지_않는다():
     st = models.apply_watch_fill(st, "20260820-005930", "2026-08-21", "202608210931")
     with pytest.raises(models.RejectedError):
         models.apply_watch_fill(st, "20260820-005930", "2026-08-22", "202608220931")
+
+
+# ── 지정가 관찰의 기한(watch.days) ────────────────────────────────────────
+# "며칠 이내에 N원에 닿으면 자동 매수" — 지금까지는 "며칠 이내에"가 빠져
+# 있었다. 대기 주문이 영원히 살아있으면, 신호가 다음날 닿은 것과 반년 뒤에
+# 닿은 것이 같은 "성공"으로 기록되어 스크리너 비교가 오염된다.
+
+
+def test_기간을_안_주면_기본값_3이다():
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000})
+    assert st["positions"][0]["watch"]["days"] == 3
+
+
+def test_명시한_기간이_반영된다():
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000, "days": 10})
+    assert st["positions"][0]["watch"]["days"] == 10
+
+
+@pytest.mark.parametrize("days", [0, -1, 61, True, "3", 3.5])
+def test_기간이_이상하면_거부한다(days):
+    """0/음수/61(상한 초과)/bool(파이썬에서 int 의 서브클래스라 별도로
+    막아야 함)/문자열/소수 — 전부 거부한다."""
+    with pytest.raises(models.RejectedError):
+        models.apply_watch(models.empty_state(), {
+            "op": "watch", "code": "005930", "name": "삼성전자",
+            "date": "2026-08-20", "price": 240000, "days": days})
+
+
+def test_normalize가_손편집된_기간을_격리한다():
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [], "status": "pending",
+        "watch": {"price": 240000, "date": "2026-08-20", "days": 0}}]}, dropped)
+    assert st["positions"] == []
+    assert len(dropped) == 1
+
+
+def test_normalize가_손편집된_가격을_격리한다():
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [], "status": "pending",
+        "watch": {"price": -1, "date": "2026-08-20", "days": 3}}]}, dropped)
+    assert st["positions"] == []
+    assert len(dropped) == 1
+
+
+def test_normalize가_손편집된_날짜를_격리한다():
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [], "status": "pending",
+        "watch": {"price": 240000, "date": "2026-13-40", "days": 3}}]}, dropped)
+    assert st["positions"] == []
+    assert len(dropped) == 1
+
+
+def test_normalize가_dict가_아닌_watch를_격리한다():
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [], "status": "pending",
+        "watch": [240000, "2026-08-20"]}]}, dropped)
+    assert st["positions"] == []
+    assert len(dropped) == 1
+
+
+def test_normalize가_멀쩡한_watch는_통과시킨다():
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [], "status": "pending",
+        "watch": {"price": 240000, "date": "2026-08-20", "days": 3}}]}, dropped)
+    assert len(st["positions"]) == 1
+    assert dropped == []
+
+
+# ── apply_expire ────────────────────────────────────────────────────────
+
+def test_기한이_지나면_expired로_바뀐다():
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000, "days": 3})
+    pid = "20260820-005930"
+    out = models.apply_expire(st, pid, "2026-08-26")
+    p = out["positions"][0]
+    assert p["status"] == "expired"
+    assert p["buys"] == []
+    assert p["watch"]["expired_on"] == "2026-08-26"
+    # price/date/days 는 그대로 남는다 — "무엇을 놓쳤는지"가 계속 읽혀야 한다
+    assert p["watch"]["price"] == 240000
+    assert p["watch"]["days"] == 3
+
+
+def test_expired_기록은_normalize를_통과한다():
+    """apply_expire 가 만든 것을 normalize 가 격리하면 안 된다 — 만료된
+    기록이 다음 읽기에서 사라져 "그 기간엔 없었다는 사실"이 지워진다."""
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000})
+    out = models.apply_expire(st, "20260820-005930", "2026-08-26")
+    dropped = []
+    assert len(models.normalize(out, dropped)["positions"]) == 1
+    assert dropped == []
+
+
+def test_pending이_아니면_만료를_거부한다():
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000})
+    st = models.apply_watch_fill(st, "20260820-005930", "2026-08-21", "202608210931")
+    with pytest.raises(models.RejectedError):
+        models.apply_expire(st, "20260820-005930", "2026-08-26")
+
+
+def test_이미_만료된_기록을_다시_만료시키면_거부한다():
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000})
+    st = models.apply_expire(st, "20260820-005930", "2026-08-26")
+    with pytest.raises(models.RejectedError):
+        models.apply_expire(st, "20260820-005930", "2026-08-27")
+
+
+def test_만료_대상이_없으면_거부한다():
+    with pytest.raises(models.RejectedError):
+        models.apply_expire(models.empty_state(), "20260820-005930", "2026-08-26")

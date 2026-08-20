@@ -76,6 +76,25 @@ def test_모르는_op는_거부한다():
         intake.apply(models.empty_state(), {"op": "지워줘", "code": "005930"})
 
 
+def test_지정가_관찰의_기간이_이슈_본문에서_끝까지_흘러간다():
+    """apply() 는 op:watch 를 models.apply_watch 로 그대로 넘긴다 —
+    days 를 이 계층에서 따로 뽑거나 검증하지 않는다(그건 models 의 일).
+    여기서는 "빠지지 않고 흘러가는가"만 확인한다."""
+    body = ('```json\n{"op":"watch","code":"005930","name":"삼성전자",'
+            '"date":"2026-08-20","price":240000,"days":10}\n```')
+    out = intake.apply(models.empty_state(), intake.extract(body))
+    p = out["positions"][0]
+    assert p["status"] == "pending"
+    assert p["watch"]["days"] == 10
+
+
+def test_지정가_관찰에서_기간을_안_주면_기본값_3이_흘러간다():
+    body = ('```json\n{"op":"watch","code":"005930","name":"삼성전자",'
+            '"date":"2026-08-20","price":240000}\n```')
+    out = intake.apply(models.empty_state(), intake.extract(body))
+    assert out["positions"][0]["watch"]["days"] == 3
+
+
 def test_본문이_아주_길면_거부한다():
     with pytest.raises(models.RejectedError):
         intake.extract("x" * 20000)

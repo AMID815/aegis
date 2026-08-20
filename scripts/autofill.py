@@ -22,6 +22,7 @@ close.py 가 하루 한 번 부른다. 계산은 전부 orders.py 에 있고, �
 from __future__ import annotations
 
 from . import gh, models, naver, orders
+from . import trading_calendar as cal
 
 POSITIONS = "positions.json"
 
@@ -104,12 +105,18 @@ def filled_prices(p: dict) -> list:
     return [b["price"] for b in p["buys"]]
 
 
-def run(bars: dict, day: str) -> int:
+def run(bars: dict, day: str, days_list: list) -> int:
     """하루치 집행. `bars` 는 close.py 가 이미 받아둔 일봉이다.
+
+    `days_list` 는 거래일 달력(close.py 가 `naver.fetch_trading_days` 로
+    이미 받아둔 것)이다 — 지정가 관찰의 기한(watch.days)이 거래일로
+    셀 것을 요구하므로(달력일로 세면 연휴마다 거짓 만료가 난다,
+    trading_calendar.py 모듈 독스트링 참조) 이 함수에도 그대로 필요하다.
 
     종료코드 관례는 close.py 와 같다 — **읽기 실패는 0, 쓰기 실패는 1.**
     네이버 타임아웃 같은 "매번 벌어지는 일"까지 실패로 표시하면 정작
-    쓰기가 실패하는(진짜 봐야 할) 신호를 무시하게 훈련시킨다.
+    쓰기가 실패하는(진짜 봐야 할) 신호를 무시하게 훈련시킨다. 만료도
+    쓰기다(status 를 EXPIRED 로 바꾸는 커밋) — 그 실패도 같은 규칙을 탄다.
 
     기록 하나마다 따로 읽고 따로 쓴다. 한 번에 모아 쓰면 그 커밋 하나가
     409 로 실패했을 때 그날 체결 전체를 잃는데, 나눠 쓰면 실패한 기록만
@@ -142,15 +149,40 @@ def run(bars: dict, day: str) -> int:
     # 경우를 다음 실행으로 미루면 그만큼 분봉 창을 까먹는다).
     for p in [x for x in state["positions"]
               if x["status"] == models.PENDING and x.get("auto", True)]:
+        watch = p["watch"]
+
+        # 기한부터 본다 — 가격을 보기 전에. 창을 넘긴 뒤 오늘 우연히
+        # 닿아도 "그 기간 안에 온 신호"가 아니다(지시문 결정 3) — 그래서
+        # 가격 조회조차 하지 않고 곧장 만료로 끝낸다. 유일한 예외는 마감일
+        # 그 날짜 자체다: `day > deadline` 을 엄격한 부등식으로 지켜야
+        # (`>=` 가 아니라) 마감일 당일의 정상 체결이 이 검사에 가로채이지
+        # 않는다 — 그래서 마감일 당일은 이 if 를 그냥 지나쳐 아래 가격
+        # 확인으로 넘어간다(순서가 여기서 실제로 의미를 가지는 지점).
+        # 달력이 답을 못 하면(watch_deadline 이 None) 만료로 보지 않는다
+        # — 클램프하지 않는 held_days 와 같은 태도.
+        deadline = cal.watch_deadline(days_list, watch["date"], watch["days"])
+        if deadline is not None and day > deadline:
+            try:
+                fresh, fresh_sha = gh.read_json(POSITIONS, default=models.empty_state())
+                out = models.apply_expire(models.normalize(fresh), p["id"], day)
+                gh.write_json(POSITIONS, out, fresh_sha, f"관찰 기한 만료: {p['name']}")
+            except Exception as e:
+                print(f"[경고] 관찰 만료 쓰기 실패 {p['id']}: {type(e).__name__}: {e}")
+                problems.append(p["id"])
+                continue
+            print(f"  관찰 기한 만료: {p['name']} (마감 {deadline} 지남)")
+            state = out
+            continue
+
         bar = bars.get(p["code"], {}).get(key)
-        if bar is None or bar["low"] > p["watch"]["price"]:
+        if bar is None or bar["low"] > watch["price"]:
             continue
         try:
             minutes = naver.fetch_minute(p["code"], day)
         except Exception as e:
             print(f"[경고] 분봉 실패 {p['code']} {day}: {type(e).__name__}: {e} — 건너뛴다")
             continue
-        hit = next((m for m in minutes if m["low"] <= p["watch"]["price"]), None)
+        hit = next((m for m in minutes if m["low"] <= watch["price"]), None)
         if hit is None:
             continue
         try:
@@ -161,7 +193,7 @@ def run(bars: dict, day: str) -> int:
             print(f"[경고] 지정가 체결 쓰기 실패 {p['id']}: {type(e).__name__}: {e}")
             problems.append(p["id"])
             continue
-        print(f"  지정가 체결: {p['name']} @ {p['watch']['price']}")
+        print(f"  지정가 체결: {p['name']} @ {watch['price']}")
         state = out
 
     for p in candidates(state):

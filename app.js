@@ -135,6 +135,24 @@
 // 이름 완전일치 폴백(실측 데이터 중복 이름 0건), renderSummary 의
 // 승률/평균수익률 대 평균보유 분모 차이(의도된 동작 — 계산 가능 조건
 // 자체가 다르다).
+//
+// 4라운드(지정가 관찰의 기한, feat/watch-expiry) 반영:
+//
+// 19. "며칠 이내에 N원에 닿으면 자동 매수" — "며칠 이내에"가 빠져 있었다
+//     (scripts/models.py `watch.days`, autofill.py 가 거래일 달력으로
+//     판정). #watch-days 입력을 #watch-field 옆에 추가하고, 기존
+//     setWatchFieldVisible() 하나에 같이 실어(applyMode() 의 네 갈래를
+//     따로 안 고쳐도 "모든 모드가 이 요소도 설정한다"가 그대로 유지된다)
+//     hidden·required 를 함께 켜고 끈다. rows() 는 새 status(expired)를
+//     pending 과 대칭인 별도 갈래로 다룬다 — buys 가 계속 비어 있고
+//     (isReadablePosition 기준으로는 "손상"으로 잘못 뜬다), closed 는
+//     false 지만(매도도 실현손익도 없다) renderSummary 의 미결 집계에서는
+//     expired 플래그로 직접 빼야 한다(closed 하나만으로는 안 빠진다 —
+//     mismatch/needsAdjustReview 와 같은 이유). nameCell 은 pending 과
+//     같은 이유로 고치기·자동전환 버튼을 안 단다. 남은 관찰 기간
+//     (remainingWatchDays)은 화면 표시 전용이다 — 실제 만료 판정은 항상
+//     서버(autofill.run)가 하고, 이 값을 못 구해도(달력 범위 밖 등)
+//     조용히 "-"로 물러날 뿐 아무것도 막지 않는다.
 
 const RAW = "https://raw.githubusercontent.com/AMID815/mouigosa/data/";
 const REPO = "https://github.com/AMID815/mouigosa";
@@ -259,6 +277,28 @@ function heldDays(dayIndex, from, to) {
   return j - i;
 }
 
+// 대기(pending) 행에 남은 거래일 — scripts/trading_calendar.watch_deadline
+// 의 JS 판박이다(파이썬 쪽이 정답, 이건 표시 전용이라 못 구하면 조용히
+// null 로 물러난다 — autofill 이 실제로 만료시키는 판단은 항상 서버 쪽
+// 값을 쓴다, 이 값은 화면 참고용일 뿐이다). watch.days 가 없는 옛 기록
+// (이 기능 이전에 등록된 관찰)은 서버 기본값 3 을 그대로 가정한다 —
+// models._watch_days 의 기본값과 맞춘다.
+//
+// "last"(가장 최근 확정 거래일) 기준으로 센다 — heldDays 가 이미 "오늘까지
+// 보유일수"를 last 기준으로 재는 것과 같은 이유(rows() 참조): 장중에는
+// trading_days 의 마지막 값이 아직 "어제"일 수 있지만, 그 시차를 이 값
+// 하나만 다르게 계산할 이유가 없다.
+function remainingWatchDays(dayIndex, days, last, watch) {
+  if (!watch || typeof watch.date !== "string" || last === null) return null;
+  const watchIdx = dayIndex.get(watch.date);
+  if (watchIdx === undefined) return null;   // 등록일이 달력 밖 — 클램프하지 않는다
+  const n = typeof watch.days === "number" ? watch.days : 3;
+  const deadlineIdx = watchIdx + n;
+  if (deadlineIdx >= days.length) return null;   // 달력이 아직 마감일까지 안 쌓였다
+  const lastIdx = dayIndex.get(last);
+  return deadlineIdx - lastIdx;
+}
+
 // buys[0].price 를 안전하게 읽을 수 있는가 — rows() 의 "읽을 수 없음" 판정과
 // findOpenPosition() 의 매도 대상 판정이 이 기준을 공유한다(통합 테스트로
 // 발견: 손편집으로 status="open" 인데 buys=[] 인 손상 레코드가 있으면,
@@ -299,8 +339,25 @@ function rows(state, quotes) {
     // 안 됐다) 지정가를 "매입가" 칸에 목표로 보여주고 나머지는 비운다.
     if (p.status === "pending") {
       const watchPrice = p.watch && typeof p.watch.price === "number" ? p.watch.price : null;
-      return { p, pending: true, bad: false, buy: watchPrice, now: null, ret: null,
-               held: null, closed: false, mismatch: false, needsAdjustReview: false,
+      return { p, pending: true, expired: false, bad: false, buy: watchPrice, now: null, ret: null,
+               held: null, remainingDays: remainingWatchDays(dayIndex, days, last, p.watch),
+               closed: false, mismatch: false, needsAdjustReview: false,
+               halted: false, buyDate: null, sellDate: null, orders, auto };
+    }
+
+    // 지정가 관찰이 기한(watch.days 거래일) 안에 목표가에 안 닿아 끝난
+    // 기록 — "이 스크리너의 신호가 안 왔다"는 그 자체로 결과이지 이기고
+    // 지는 게 아니다(지시문 결정 4). buys 는 pending 과 마찬가지로 계속
+    // 비어 있다 — closed 는 false 로 둔다(매도도, 실현 손익도 없다 —
+    // "종결"이 아니다). renderSummary 가 승률·평균수익률·미결 어디에도
+    // 이 행을 안 넣도록 expired 플래그로 직접 걸러낸다(closed 만으로는
+    // 미결 판정에서 안 빠진다 — mismatch/needsAdjustReview 처럼 별도
+    // 플래그가 필요한 이유가 같다).
+    if (p.status === "expired") {
+      const watchPrice = p.watch && typeof p.watch.price === "number" ? p.watch.price : null;
+      return { p, pending: false, expired: true, bad: false, buy: watchPrice, now: null, ret: null,
+               held: null, remainingDays: null,
+               closed: false, mismatch: false, needsAdjustReview: false,
                halted: false, buyDate: null, sellDate: null, orders, auto };
     }
 
@@ -308,8 +365,8 @@ function rows(state, quotes) {
     // normalize 가 없다. 화면에서 조용히 사라지면 안 되므로, 던지지 말고
     // '읽을 수 없음' 으로 표시한다.
     if (!isReadablePosition(p)) {
-      return { p, bad: true, pending: false, buy: null, now: null, ret: null, held: null,
-               closed: p.status === "closed", mismatch: false,
+      return { p, bad: true, pending: false, expired: false, buy: null, now: null, ret: null, held: null,
+               remainingDays: null, closed: p.status === "closed", mismatch: false,
                needsAdjustReview: false, halted: false,
                buyDate: null, sellDate: null, orders, auto };
     }
@@ -342,8 +399,8 @@ function rows(state, quotes) {
     if (needsAdjustReview) {
       const until = hasExit ? p.exits[p.exits.length - 1].date : (closed ? null : last);
       return {
-        p, pending: false, buy: null, now: null, ret: null,
-        held: heldDays(dayIndex, p.buys[0].date, until),
+        p, pending: false, expired: false, buy: null, now: null, ret: null,
+        held: heldDays(dayIndex, p.buys[0].date, until), remainingDays: null,
         closed, mismatch, needsAdjustReview, halted: false,
         buyDate: p.buys[0].date, sellDate: hasExit ? until : null,
         orders, auto,
@@ -361,9 +418,9 @@ function rows(state, quotes) {
     const until = sold !== null ? p.exits[p.exits.length - 1].date
                 : (closed ? null : last);
     return {
-      p, pending: false, buy, now,
+      p, pending: false, expired: false, buy, now,
       ret: now === null ? null : pct(buy, now),
-      held: heldDays(dayIndex, p.buys[0].date, until),
+      held: heldDays(dayIndex, p.buys[0].date, until), remainingDays: null,
       closed, mismatch, needsAdjustReview,
       halted: !!(q && q.status !== "tradable"),
       buyDate: p.buys[0].date,
@@ -403,13 +460,14 @@ function nameCell(tr, r, mark) {
   span.textContent = (r.p.name || r.p.code || "?") + mark;
   wrap.appendChild(span);
   if (!r.bad && typeof r.p.id === "string" && r.p.id) {
-    // 대기(pending) 기록에는 고치기를 달지 않는다. 달면 startAmend 가
-    // isReadablePosition(buys 가 비어 있어 false)에서 막으면서 "이 기록은
-    // 형식이 올바르지 않아 고칠 수 없습니다" 라고 말하는데, 그건 거짓이다
-    // — 손상된 게 아니라 아직 안 산 것뿐이다. 사용자가 파일이 깨졌다고
-    // 믿고 손편집하러 가게 만드는, amend 가 없애려던 바로 그 루프다.
+    // 대기(pending)·만료(expired) 기록에는 고치기를 달지 않는다. 달면
+    // startAmend 가 isReadablePosition(buys 가 비어 있어 false)에서
+    // 막으면서 "이 기록은 형식이 올바르지 않아 고칠 수 없습니다" 라고
+    // 말하는데, 그건 거짓이다 — 손상된 게 아니라 아직 안 샀거나(pending)
+    // 끝내 안 샀을 뿐이다(expired). 사용자가 파일이 깨졌다고 믿고
+    // 손편집하러 가게 만드는, amend 가 없애려던 바로 그 루프다.
     // (지정가 자체를 고치는 건 아직 연산이 없다 — 지우고 다시 넣는다.)
-    if (!r.pending) {
+    if (!r.pending && !r.expired) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "amend-btn";
@@ -419,11 +477,11 @@ function nameCell(tr, r, mark) {
     wrap.appendChild(btn);
     }
 
-    // 자동/수동 토글 — 종결된 기록(closed)은 더 이상 물타기·익절·손절의
-    // 대상이 아니므로(전부 이미 끝났다) 보여줄 이유가 없다. 열려 있거나
-    // (open) 아직 체결 전(pending)인 기록에만 단다 — 이 두 상태만 앞으로
-    // 자동 매매가 실제로 일어날 수 있다.
-    if (!r.closed) {
+    // 자동/수동 토글 — 종결된 기록(closed)이나 만료된 기록(expired)은 더
+    // 이상 물타기·익절·손절의 대상이 아니므로(전부 이미 끝났다) 보여줄
+    // 이유가 없다. 열려 있거나(open) 아직 체결 전(pending)인 기록에만
+    // 단다 — 이 두 상태만 앞으로 자동 매매가 실제로 일어날 수 있다.
+    if (!r.closed && !r.expired) {
       const toggleBtn = document.createElement("button");
       toggleBtn.type = "button";
       toggleBtn.className = "auto-toggle-btn";
@@ -474,6 +532,11 @@ function renderTable(id, list) {
       // 것도 동시에 될 수 없다(아직 buys 자체가 없다) — 괄호 플래그 목록과
       // 섞이지 않는 대괄호로 확실히 구분한다.
       mark = " [대기]";
+    } else if (r.expired) {
+      // pending 과 같은 이유로 대괄호 — 기한을 넘겨 끝난 관찰도 buys 가
+      // 계속 비어 있어 bad/needsAdjustReview/mismatch/halted 어느 것도
+      // 동시에 될 수 없다.
+      mark = " [만료]";
     } else {
       const flags = [];
       if (r.needsAdjustReview) flags.push("액면조정 확인 필요");
@@ -485,10 +548,21 @@ function renderTable(id, list) {
     cell(tr, fmt(r.buy));
     cell(tr, fmt(r.now));
     cell(tr, fmtPct(r.ret), cls(r.ret));
-    // pending 은 아직 보유가 시작되지 않아 "범위 밖"(=달력 범위 밖이라 못
-    // 구함)이라는 문구가 사실과 다르게 읽힌다 — 아직 세기 시작도 안 했다는
-    // 뜻으로 "-" 를 쓴다.
-    cell(tr, r.pending ? "-" : (r.held === null ? "범위 밖" : r.held + "일"));
+    // pending 은 남은 관찰 기간(remainingDays 를 구할 수 있으면)을 보여준다
+    // — "범위 밖"(=달력 범위 밖이라 못 구함)이라는 문구는 이미 보유가
+    // 시작된 기록에나 맞는 말이라 아직 세기 시작도 안 한 pending 에는
+    // 사실과 다르게 읽힌다. expired 는 더 이상 셀 보유일수 자체가 없으므로
+    // "-"다(만료 시점은 표에 안 보이지만 watch.expired_on 에 남아있다).
+    let heldCell;
+    if (r.pending) {
+      heldCell = r.remainingDays === null ? "-"
+               : (r.remainingDays >= 0 ? "D-" + r.remainingDays : "기한 지남");
+    } else if (r.expired) {
+      heldCell = "-";
+    } else {
+      heldCell = r.held === null ? "범위 밖" : r.held + "일";
+    }
+    cell(tr, heldCell);
     cell(tr, r.p.source || "(출처 없음)");   // positions.json 은 normalize() 를 안 거친다 — 필드 누락 가능
     tb.appendChild(tr);
   }
@@ -535,12 +609,20 @@ function renderSummary(list, quotes) {
   // 미결 건수 — 설계 §11 의 한계를 화면이 드러내야 한다. 2차·3차가 끝내
   // 안 걸리고 익절도 안 닿은 종목은 손절 경로가 없어 영원히 열려 있다.
   // 이걸 안 보여주면 승률이 "닫힌 것 중 이긴 비율"이라는 사실이 가려져서,
-  // 미결이 쌓일수록 실제보다 좋아 보인다.
-  const openRows = list.filter(r => !r.closed && !r.bad && !r.pending);
+  // 미결이 쌓일수록 실제보다 좋아 보인다. expired 는 여기서도 뺀다 —
+  // "아직 안 끝났다"(미결)와 "기한을 넘겨 안 샀다"(만료)는 다른 이야기다.
+  const openRows = list.filter(r => !r.closed && !r.bad && !r.pending && !r.expired);
   add("미결", openRows.length + "건");
   const openHeld = openRows.filter(r => r.held !== null);
   add("미결 평균 보유", openHeld.length
     ? (openHeld.reduce((s, r) => s + r.held, 0) / openHeld.length).toFixed(1) + "일" : "-");
+
+  // 만료 건수 — "이 스크리너의 신호가 기한 안에 목표가에 안 닿았다"도
+  // 그 자체로 결과다(지시문 결정 4). 승률·평균수익률·미결 어디에도 안
+  // 들어가는 대신, 그 사실 자체를 여기 숫자로 남긴다 — 안 보여주면 이
+  // 신호들이 통계에서 그냥 사라진 것처럼 보인다.
+  const expiredCount = list.filter(r => r.expired).length;
+  add("만료", expiredCount + "건");
 
   // 출처별 — 이 트래커의 존재 이유
   // 출처는 일부러 고정 목록으로 검증하지 않는다 — 스크리너가 하나 늘면
@@ -937,6 +1019,13 @@ function setExitFieldsVisible(v) {
 function setWatchFieldVisible(v) {
   document.getElementById("watch-field").hidden = !v;
   document.getElementById("watch-price").required = v;
+  // #watch-days 도 같은 함정을 갖는다 — hidden 과 required 를 항상 같이
+  // 켜고 끈다. applyMode() 의 네 갈래가 전부 이 함수 하나를 통해서만
+  // #watch-field 를 건드리므로, 여기 한 곳에 추가하는 것만으로 "모든
+  // 모드가 이 요소도 설정한다"는 불변식이 그대로 유지된다 — applyMode()
+  // 자체를 네 곳 다 고칠 필요가 없다.
+  document.getElementById("watch-days-field").hidden = !v;
+  document.getElementById("watch-days").required = v;
 }
 
 // #source 는 고정 5개 옵션 select 다(매입 모드는 항상 이 중 하나만 쓴다).
@@ -1117,6 +1206,7 @@ function exitAmendMode() {
   // 상태가 된다(다음 #entry-mode change 나 #q input 이 있기 전까지).
   document.getElementById("entry-mode").value = "buy";
   document.getElementById("watch-price").value = "";
+  document.getElementById("watch-days").value = "3";
   applyMode("buy");
   fillCandidates("");
 }
@@ -1568,7 +1658,18 @@ async function onSubmit(ev) {
   const name = NAMES.get(code) || code;
 
   if (watching) {
-    const payload = { op: "watch", code, name, price, date,
+    // "며칠 이내에 N원에 닿으면 자동 매수" — days 가 그 "며칠 이내에"다.
+    // parsePrice() 로 콤마·공백을 지운 뒤 1~60 사이의 정수인지 확인한다
+    // (서버 쪽 models._watch_days 와 같은 범위 — 상한 60 의 근거는 그
+    // 함수 옆 주석 참조: 분봉 재생 창은 7거래일뿐이라는 사실을 인지한
+    // 넉넉한 안전 상한이지, 정밀도 보장이 아니다). Number.isInteger 로
+    // 소수(예: "3.5")도 막는다 — parsePrice 는 콤마만 지울 뿐 정수인지는
+    // 안 본다.
+    const days = parsePrice(document.getElementById("watch-days").value);
+    if (!(Number.isInteger(days) && days >= 1 && days <= 60)) {
+      return alert("관찰 기간은 1~60 거래일 사이의 정수여야 합니다.");
+    }
+    const payload = { op: "watch", code, name, price, date, days,
       source: document.getElementById("source").value,
       memo: document.getElementById("memo").value };
     await writeRecord(payload, "WATCH " + name, name);

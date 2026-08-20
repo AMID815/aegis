@@ -1,5 +1,5 @@
 {
- "as_of_kst": "2026-08-20T16:13:26+09:00",
+ "as_of_kst": "2026-08-20T17:29:41+09:00",
  "benchmark": {
   "KOSDAQ": 840.89,
   "KOSPI": 6852.58
@@ -512,13 +512,13 @@
   }
  },
  "fail_count": 0,
- "is_final": false,
+ "is_final": true,
  "missing": [],
  "ok_count": 1,
  "positions_dropped": 0,
  "quotes": {
   "005930": {
-   "market": "CLOSE",
+   "market": "",
    "name": "삼성전자",
    "price": 271000,
    "status": "tradable"

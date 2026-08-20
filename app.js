@@ -285,14 +285,33 @@ function rows(state, quotes) {
   const dayIndex = new Map(days.map((d, i) => [d, i]));
   const last = days.length ? days[days.length - 1] : null;
   return (state.positions || []).map(p => {
+    // orders/auto 는 이 함수 자신은 안 쓴다 — nameCell (렌더 쪽)이 자동
+    // 예외 표시·토글 버튼을 그리는 데 쓴다. 갈래마다 따로 넣으면 하나라도
+    // 빠뜨려 nameCell 이 undefined 를 만나기 쉬우니, 갈래를 타기 전에
+    // 한 번만 계산해 모든 return 문에 그대로 얹는다.
+    const orders = p.orders || {};
+    const auto = p.auto !== false;
+
+    // 지정가 관찰(watch) 대기 기록 — 아직 아무것도 안 샀으므로 buys 가
+    // 정상적으로 비어 있다. isReadablePosition 기준(아래)으로 판정하면
+    // "읽을 수 없음"으로 잘못 뜬다 — 이 기록은 손상이 아니라 정상적인
+    // 대기 상태다. 매입가/현재가/수익률은 아직 의미가 없으므로(1차 매수도
+    // 안 됐다) 지정가를 "매입가" 칸에 목표로 보여주고 나머지는 비운다.
+    if (p.status === "pending") {
+      const watchPrice = p.watch && typeof p.watch.price === "number" ? p.watch.price : null;
+      return { p, pending: true, bad: false, buy: watchPrice, now: null, ret: null,
+               held: null, closed: false, mismatch: false, needsAdjustReview: false,
+               halted: false, buyDate: null, sellDate: null, orders, auto };
+    }
+
     // 파이썬이 격리한(quarantined) 기록도 여기로 그대로 온다 — 페이지에는
     // normalize 가 없다. 화면에서 조용히 사라지면 안 되므로, 던지지 말고
     // '읽을 수 없음' 으로 표시한다.
     if (!isReadablePosition(p)) {
-      return { p, bad: true, buy: null, now: null, ret: null, held: null,
+      return { p, bad: true, pending: false, buy: null, now: null, ret: null, held: null,
                closed: p.status === "closed", mismatch: false,
                needsAdjustReview: false, halted: false,
-               buyDate: null, sellDate: null };
+               buyDate: null, sellDate: null, orders, auto };
     }
 
     // status 와 exits 가 서로 다른 이야기를 할 수 있다(항목 8) —
@@ -323,10 +342,11 @@ function rows(state, quotes) {
     if (needsAdjustReview) {
       const until = hasExit ? p.exits[p.exits.length - 1].date : (closed ? null : last);
       return {
-        p, buy: null, now: null, ret: null,
+        p, pending: false, buy: null, now: null, ret: null,
         held: heldDays(dayIndex, p.buys[0].date, until),
         closed, mismatch, needsAdjustReview, halted: false,
         buyDate: p.buys[0].date, sellDate: hasExit ? until : null,
+        orders, auto,
       };
     }
 
@@ -341,13 +361,14 @@ function rows(state, quotes) {
     const until = sold !== null ? p.exits[p.exits.length - 1].date
                 : (closed ? null : last);
     return {
-      p, buy, now,
+      p, pending: false, buy, now,
       ret: now === null ? null : pct(buy, now),
       held: heldDays(dayIndex, p.buys[0].date, until),
       closed, mismatch, needsAdjustReview,
       halted: !!(q && q.status !== "tradable"),
       buyDate: p.buys[0].date,
       sellDate: sold !== null ? until : null,
+      orders, auto,
     };
   });
 }
@@ -382,6 +403,13 @@ function nameCell(tr, r, mark) {
   span.textContent = (r.p.name || r.p.code || "?") + mark;
   wrap.appendChild(span);
   if (!r.bad && typeof r.p.id === "string" && r.p.id) {
+    // 대기(pending) 기록에는 고치기를 달지 않는다. 달면 startAmend 가
+    // isReadablePosition(buys 가 비어 있어 false)에서 막으면서 "이 기록은
+    // 형식이 올바르지 않아 고칠 수 없습니다" 라고 말하는데, 그건 거짓이다
+    // — 손상된 게 아니라 아직 안 산 것뿐이다. 사용자가 파일이 깨졌다고
+    // 믿고 손편집하러 가게 만드는, amend 가 없애려던 바로 그 루프다.
+    // (지정가 자체를 고치는 건 아직 연산이 없다 — 지우고 다시 넣는다.)
+    if (!r.pending) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "amend-btn";
@@ -389,8 +417,40 @@ function nameCell(tr, r, mark) {
     btn.dataset.id = r.p.id;
     btn.setAttribute("aria-label", "고치기: " + (r.p.name || r.p.code || "?"));
     wrap.appendChild(btn);
+    }
+
+    // 자동/수동 토글 — 종결된 기록(closed)은 더 이상 물타기·익절·손절의
+    // 대상이 아니므로(전부 이미 끝났다) 보여줄 이유가 없다. 열려 있거나
+    // (open) 아직 체결 전(pending)인 기록에만 단다 — 이 두 상태만 앞으로
+    // 자동 매매가 실제로 일어날 수 있다.
+    if (!r.closed) {
+      const toggleBtn = document.createElement("button");
+      toggleBtn.type = "button";
+      toggleBtn.className = "auto-toggle-btn";
+      toggleBtn.textContent = r.auto === false ? "자동 전환" : "수동 전환";
+      toggleBtn.dataset.id = r.p.id;
+      toggleBtn.dataset.code = r.p.code;
+      toggleBtn.dataset.nextAuto = r.auto === false ? "true" : "false";   // 누르면 될 다음 값
+      toggleBtn.setAttribute("aria-label",
+        (r.auto === false ? "자동 매매로 전환: " : "자동 매매 예외(수동)로 전환: ")
+        + (r.p.name || r.p.code || "?"));
+      wrap.appendChild(toggleBtn);
+    }
   }
   td.appendChild(wrap);
+
+  // 자동 예외로 지정된 기록은 표에서 바로 구분되어야 한다. 안 그러면
+  // "왜 이 종목만 자동 체결이 안 되지" 를 알 방법이 없다. r.bad 여부와
+  // 무관하게 확인한다 — 손상된 기록이라도 저장된 auto:false 는 여전히
+  // 사실이라, 그 상태를 굳이 이 표시에서만 숨길 이유가 없다(위 wrap 은
+  // r.bad 면 고치기/토글 버튼이 없을 뿐 이름 자체는 항상 그린다).
+  if (r.auto === false) {
+    const s = document.createElement("span");
+    s.className = "manual-mark";
+    s.textContent = " [수동]";
+    s.title = "자동 매매 예외 — 물타기·익절·손절이 모두 멈춰 있습니다";
+    td.appendChild(s);
+  }
   tr.appendChild(td);
 }
 
@@ -409,6 +469,11 @@ function renderTable(id, list) {
     let mark = "";
     if (r.bad) {
       mark = " (읽을 수 없음)";
+    } else if (r.pending) {
+      // pending 은 구조적으로 bad/needsAdjustReview/mismatch/halted 어느
+      // 것도 동시에 될 수 없다(아직 buys 자체가 없다) — 괄호 플래그 목록과
+      // 섞이지 않는 대괄호로 확실히 구분한다.
+      mark = " [대기]";
     } else {
       const flags = [];
       if (r.needsAdjustReview) flags.push("액면조정 확인 필요");
@@ -420,7 +485,10 @@ function renderTable(id, list) {
     cell(tr, fmt(r.buy));
     cell(tr, fmt(r.now));
     cell(tr, fmtPct(r.ret), cls(r.ret));
-    cell(tr, r.held === null ? "범위 밖" : r.held + "일");
+    // pending 은 아직 보유가 시작되지 않아 "범위 밖"(=달력 범위 밖이라 못
+    // 구함)이라는 문구가 사실과 다르게 읽힌다 — 아직 세기 시작도 안 했다는
+    // 뜻으로 "-" 를 쓴다.
+    cell(tr, r.pending ? "-" : (r.held === null ? "범위 밖" : r.held + "일"));
     cell(tr, r.p.source || "(출처 없음)");   // positions.json 은 normalize() 를 안 거친다 — 필드 누락 가능
     tb.appendChild(tr);
   }
@@ -463,6 +531,16 @@ function renderSummary(list, quotes) {
   const held = done.filter(r => r.held !== null);
   add("평균 보유", held.length
     ? (held.reduce((s, r) => s + r.held, 0) / held.length).toFixed(1) + "일" : "-");
+
+  // 미결 건수 — 설계 §11 의 한계를 화면이 드러내야 한다. 2차·3차가 끝내
+  // 안 걸리고 익절도 안 닿은 종목은 손절 경로가 없어 영원히 열려 있다.
+  // 이걸 안 보여주면 승률이 "닫힌 것 중 이긴 비율"이라는 사실이 가려져서,
+  // 미결이 쌓일수록 실제보다 좋아 보인다.
+  const openRows = list.filter(r => !r.closed && !r.bad && !r.pending);
+  add("미결", openRows.length + "건");
+  const openHeld = openRows.filter(r => r.held !== null);
+  add("미결 평균 보유", openHeld.length
+    ? (openHeld.reduce((s, r) => s + r.held, 0) / openHeld.length).toFixed(1) + "일" : "-");
 
   // 출처별 — 이 트래커의 존재 이유
   // 출처는 일부러 고정 목록으로 검증하지 않는다 — 스크리너가 하나 늘면
@@ -740,6 +818,8 @@ function applyMode(mode, opts) {
   opts = opts || {};
   const modeEl = document.getElementById("mode");
   const label = document.getElementById("price-label");
+  const priceField = document.getElementById("price-field");
+  const price = document.getElementById("price");
   const srcField = document.getElementById("source-field");
   const form = document.getElementById("form");
   const btn = document.getElementById("submit-btn");
@@ -752,29 +832,55 @@ function applyMode(mode, opts) {
     modeEl.hidden = false;
     modeEl.textContent = "매도 입력 — 보유 중인 종목입니다";
     label.textContent = "매도가";
+    priceField.hidden = false;
+    price.required = true;
     srcField.hidden = true;      // 매도에는 출처가 의미 없다
     btn.textContent = "매도 저장";   // Worker 연동 전엔 "매도 이슈 열기" — 이제 주 경로가 깃허브 이슈를 직접 열지 않는다
     cancelBtn.hidden = true;
     sigField.hidden = true;
     setExitFieldsVisible(false);
+    setWatchFieldVisible(false);
   } else if (mode === "amend") {
     modeEl.hidden = false;
     modeEl.textContent = "고치기 — 기존 기록을 고치는 중입니다";
     label.textContent = "매입가";
+    priceField.hidden = false;
+    price.required = true;
     srcField.hidden = false;
     btn.textContent = "고치기 반영";
     cancelBtn.hidden = false;
     sigField.hidden = false;
     setExitFieldsVisible(!!opts.hasExit);
+    setWatchFieldVisible(false);
+  } else if (mode === "watch") {
+    // Task 13(지정가 관찰) — #price 대신 #watch-price 를 받는다. 매입가
+    // 필드를 숨기는 김에 required 도 같이 끈다(아래 setWatchFieldVisible
+    // 옆 주석과 같은 이유 — 숨은 필드에 required 가 남으면 submit 자체가
+    // 죽는다). #source-field 는 켜 둔다 — 관찰도 어느 스크리너의 신호로
+    // 시작한 것일 수 있어 출처가 여전히 의미 있다(지시문).
+    modeEl.hidden = false;
+    modeEl.textContent = "지정가 관찰 — 목표가에 닿으면 1차 매수가 자동 체결됩니다";
+    label.textContent = "매입가";   // 숨어서 안 보이지만, buy 로 되돌아갈 때 바로 맞는 문구가 되도록 미리 맞춰둔다
+    priceField.hidden = true;
+    price.required = false;
+    srcField.hidden = false;
+    btn.textContent = "관찰 시작";
+    cancelBtn.hidden = true;
+    sigField.hidden = true;
+    setExitFieldsVisible(false);
+    setWatchFieldVisible(true);
   } else {   // "buy" — 기본값
     modeEl.hidden = true;
     modeEl.textContent = "";
     label.textContent = "매입가";
+    priceField.hidden = false;
+    price.required = true;
     srcField.hidden = false;
     btn.textContent = "저장";   // Worker 연동 전엔 "깃허브에서 저장" — 이제 주 경로가 깃허브 이슈를 직접 열지 않는다
     cancelBtn.hidden = true;
     sigField.hidden = true;
     setExitFieldsVisible(false);
+    setWatchFieldVisible(false);
   }
 }
 
@@ -793,6 +899,16 @@ function updateMode() {
   // 함수 안에도 한 번 더 둔다 — 호출부 가드가 나중에 또 빠지더라도
   // amend 도중에는 최소한 이 함수 자체가 아무 것도 안 하게.
   if (amendTarget) return;
+  // Task 13(지정가 관찰) — #entry-mode 가 "watch" 면 #q 로 고른 종목의
+  // 보유 여부와 무관하게 관찰 모드를 유지한다. 이 가드가 없으면, 이미
+  // 보유 중인 종목의 코드를 입력하는 순간(드물지만 막을 이유도 없는
+  // 경우) findOpenPosition 이 걸려 사용자가 방금 고른 "지정가 관찰"을
+  // 코드가 조용히 "매도"로 되돌려버린다.
+  const entryMode = document.getElementById("entry-mode").value;
+  if (entryMode === "watch") {
+    applyMode("watch");
+    return;
+  }
   const code = resolveCode(document.getElementById("q").value);
   applyMode(code && findOpenPosition(code) ? "sell" : "buy");
 }
@@ -811,6 +927,16 @@ function setExitFieldsVisible(v) {
   document.getElementById("exit-reason-field").hidden = !v;
   document.getElementById("exit-price").required = v;
   document.getElementById("exit-date").required = v;
+}
+
+// Task 13(지정가 관찰) — #watch-price 도 같은 함정을 갖고 있다: hidden 인
+// 컨트롤에 required 가 남아 있으면 그 필드에서 constraint validation 이
+// 막혀 submit 이벤트 자체가 안 나간다(위 setExitFieldsVisible 옆 주석,
+// 리뷰 C1 이 실제로 겪은 사고). hidden 과 required 를 항상 한 자리에서
+// 같이 켜고 끈다.
+function setWatchFieldVisible(v) {
+  document.getElementById("watch-field").hidden = !v;
+  document.getElementById("watch-price").required = v;
 }
 
 // #source 는 고정 5개 옵션 select 다(매입 모드는 항상 이 중 하나만 쓴다).
@@ -847,6 +973,34 @@ function onAmendButtonClick(e) {
   const btn = e.target.closest(".amend-btn");
   if (!btn) return;
   startAmend(btn.dataset.id);
+}
+
+// 자동/수동 토글 — 같은 위임 클릭 패턴을 쓴다(위 onAmendButtonClick 과
+// 같은 이유: renderTable 이 매 렌더마다 tbody 를 통째로 비운다). 고치기와
+// 달리 폼을 거치지 않고 즉시 쓰기 요청을 내보내므로(리뷰할 폼 화면이
+// 없다), 그 자리에서 confirm() 으로 한 번 확인한다 — 특히 수동 전환은
+// 물타기·익절·손절을 전부 멈추는 결정이라 실수로 누른 걸 되돌리기 전에
+// 최소한 한 번은 되묻는 게 맞다고 판단했다.
+function onAutoToggleButtonClick(e) {
+  const btn = e.target.closest(".auto-toggle-btn");
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const code = btn.dataset.code;
+  const nextAuto = btn.dataset.nextAuto === "true";
+  const p = STATE.positions.find(x => x.id === id);
+  const name = (p && (p.name || p.code)) || code;
+  const question = nextAuto
+    ? "\"" + name + "\" 을(를) 다시 자동 매매로 되돌릴까요? (물타기·익절·손절이 다시 자동으로 걸립니다)"
+    : "\"" + name + "\" 을(를) 수동으로 전환할까요? (물타기·익절·손절이 모두 멈춥니다)";
+  if (!confirm(question)) return;
+  // await 하지 않는다 — writeRecord() 의 첫 줄(window.open)이 아직 이
+  // 클릭 이벤트와 같은 동기 구간 안에서 실행돼야(async 함수는 첫 await
+  // 전까지 호출자와 같은 태스크에서 그대로 실행된다) 팝업 차단을 피할 수
+  // 있다(onSubmit 옆 주석과 같은 요령). 실패해도 결과는 renderResult()가
+  // 화면에 남기고, 남는 예외는 전역 unhandledrejection 경계(reportFatal)
+  // 가 받는다.
+  writeRecord({ op: "auto", id, was: code, auto: nextAuto },
+              (nextAuto ? "AUTO-ON " : "AUTO-OFF ") + name, name);
 }
 
 // id 로 STATE 에서 기록을 찾아 amend 폼을 채운다. **재조회하지 않는다** —
@@ -957,6 +1111,12 @@ function exitAmendMode() {
   document.getElementById("exit-price").value = "";
   document.getElementById("exit-date").value = "";
   document.getElementById("exit-reason").value = "";
+  // amend 로 들어오기 전에 "지정가 관찰"을 골라뒀을 수 있다 — applyMode("buy")
+  // 는 화면을 강제로 매입 모드로 되돌리는데, #entry-mode 를 그대로 두면
+  // 셀렉트는 "관찰"을 가리키면서 화면은 매입가 칸을 보여주는 어긋난
+  // 상태가 된다(다음 #entry-mode change 나 #q input 이 있기 전까지).
+  document.getElementById("entry-mode").value = "buy";
+  document.getElementById("watch-price").value = "";
   applyMode("buy");
   fillCandidates("");
 }
@@ -1381,16 +1541,24 @@ async function onSubmit(ev) {
       ? "종목 목록을 불러오지 못해 코드를 확인할 수 없습니다. 새로고침 후 다시 시도해주세요."
       : "종목을 목록에서 골라주세요.");
   }
-  const price = parsePrice(document.getElementById("price").value);
   const date = document.getElementById("date").value;
-  if (!(price > 0)) return alert("매입가를 확인해주세요.");
   if (!date) return alert("매입일을 골라주세요.");
 
-  const open = findOpenPosition(code);
+  // Task 13(지정가 관찰) — 지금 렌더된 모드가 곧 폼의 진실이다(applyMode
+  // 가 매번 #form.dataset.mode 를 같이 써 두므로, updateMode() 의 판정과
+  // 어긋날 일이 없다). 관찰 모드에서는 #price 가 숨어 있어(값이 남아있을
+  // 수도, 비어있을 수도 있다) 매입가 검증 대상이 아니다 — #watch-price 를
+  // 대신 읽는다.
+  const watching = document.getElementById("form").dataset.mode === "watch";
+  const price = parsePrice(document.getElementById(watching ? "watch-price" : "price").value);
+  if (!(price > 0)) return alert(watching ? "지정가를 확인해주세요." : "매입가를 확인해주세요.");
 
   // 오타 방지: 참고가(referencePrice — quotes 우선, 없으면 master.json
   // 현재가로 폴백, 항목 18) 대비 ±30% 를 벗어나면 되묻는다. 참고가가
   // 아예 없으면(null) 조용히 넘어간다 — referencePrice 옆 주석 참조.
+  // 지정가 관찰도 결국 이 가격에 자동으로 1차 매수가 걸리므로, 매입가
+  // 오타와 똑같은 무게로 다룬다 — 여기서만 봐주면 오타 하나가 그대로
+  // 대기 주문에 실려 나중에(며칠 뒤일 수도 있다) 조용히 체결된다.
   const ref = referencePrice(code);
   if (ref !== null && Math.abs(pct(ref, price)) > 30) {
     if (!confirm("최근 종가 " + fmt(ref) + "원과 " + Math.round(Math.abs(pct(ref, price)))
@@ -1398,6 +1566,16 @@ async function onSubmit(ev) {
   }
 
   const name = NAMES.get(code) || code;
+
+  if (watching) {
+    const payload = { op: "watch", code, name, price, date,
+      source: document.getElementById("source").value,
+      memo: document.getElementById("memo").value };
+    await writeRecord(payload, "WATCH " + name, name);
+    return;
+  }
+
+  const open = findOpenPosition(code);
   const payload = open
     ? { op: "sell", code, price, date, reason: document.getElementById("memo").value }
     : { op: "buy", code, name, price, date,
@@ -1414,6 +1592,12 @@ document.getElementById("q").addEventListener("input", e => {
   // (Task 15 — amend 는 버튼으로만 들어오고 #cancel-btn 으로만 나간다).
   if (!amendTarget) updateMode();
 });
+// Task 13(지정가 관찰) — #q 입력 리스너와 같은 가드를 쓴다. amend 도중에
+// 이 셀렉트를 만지는 경우는 흔치 않지만, 만약 만지더라도 amend 화면이
+// 매입/관찰 모드로 갑자기 바뀌면 안 된다(같은 이유, 위 리뷰 C2).
+document.getElementById("entry-mode").addEventListener("change", () => {
+  if (!amendTarget) updateMode();
+});
 document.getElementById("form").addEventListener("submit", ev => {
   if (amendTarget) { onAmendSubmit(ev); return; }
   onSubmit(ev);
@@ -1421,6 +1605,11 @@ document.getElementById("form").addEventListener("submit", ev => {
 document.getElementById("cancel-btn").addEventListener("click", exitAmendMode);
 document.getElementById("open").addEventListener("click", onAmendButtonClick);
 document.getElementById("closed").addEventListener("click", onAmendButtonClick);
+// 자동/수동 토글 버튼은 #open(보유 중 — open/pending 이 여기 그려진다)에만
+// 나온다(nameCell 이 r.closed 인 행에는 아예 안 그린다) — 그래도 #closed
+// 에 걸어도 해가 되진 않지만, 실제로 쓰이지 않을 리스너를 다는 대신
+// 렌더가 실제로 그 버튼을 두는 표 하나에만 건다.
+document.getElementById("open").addEventListener("click", onAutoToggleButtonClick);
 
 // main() 은 더 이상 이 자리에서 즉시 실행되지 않는다 — 통과 커튼(맨 아래
 // 절)이 통과된 뒤에만(이미 통과해 있었으면 로드 즉시, 아니면 #gate-form

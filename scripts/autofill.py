@@ -137,6 +137,33 @@ def run(bars: dict, day: str) -> int:
         print(f"[중단] 해석 불가 항목 {len(bad)}건 — 자동 체결을 건너뛴다")
         return 0
 
+    # 대기 주문(pending) 먼저 본다 — 오늘 체결되면 그 뒤 물타기·익절
+    # 판정까지 같은 실행에서 이어져야 한다(같은 날 매수·매도가 나는
+    # 경우를 다음 실행으로 미루면 그만큼 분봉 창을 까먹는다).
+    for p in [x for x in state["positions"]
+              if x["status"] == models.PENDING and x.get("auto", True)]:
+        bar = bars.get(p["code"], {}).get(key)
+        if bar is None or bar["low"] > p["watch"]["price"]:
+            continue
+        try:
+            minutes = naver.fetch_minute(p["code"], day)
+        except Exception as e:
+            print(f"[경고] 분봉 실패 {p['code']} {day}: {type(e).__name__}: {e} — 건너뛴다")
+            continue
+        hit = next((m for m in minutes if m["low"] <= p["watch"]["price"]), None)
+        if hit is None:
+            continue
+        try:
+            fresh, fresh_sha = gh.read_json(POSITIONS, default=models.empty_state())
+            out = models.apply_watch_fill(models.normalize(fresh), p["id"], day, hit["t"])
+            gh.write_json(POSITIONS, out, fresh_sha, f"지정가 체결: {p['name']}")
+        except Exception as e:
+            print(f"[경고] 지정가 체결 쓰기 실패 {p['id']}: {type(e).__name__}: {e}")
+            problems.append(p["id"])
+            continue
+        print(f"  지정가 체결: {p['name']} @ {p['watch']['price']}")
+        state = out
+
     for p in candidates(state):
         bar = bars.get(p["code"], {}).get(key)
         if bar is None:

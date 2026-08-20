@@ -141,14 +141,14 @@ const REPO = "https://github.com/AMID815/mouigosa";
 const STALE_MIN = 40;                // 30분 주기 + 여유 — 장중(is_final=false)에만 쓴다(항목 15)
 const STALE_CONFIRM_DAYS = 4;        // 확정 종가가 이보다 오래 그대로면 경보 — 주말+연휴 흡수용 여유
 
-// Cloudflare Worker 쓰기 프록시 주소 — worker/README.md 4단계에서 실제 배포
-// 주소로 바꾼다. index.html 의 CSP connect-src 안 같은 문자열도 함께 바꿔야
+// Cloudflare Worker 쓰기 프록시 주소(2026-08-20 배포로 채워짐; 절차는
+// worker/README.md). index.html 의 CSP connect-src 안 같은 문자열도 함께 바꿔야
 // 한다(둘 중 하나만 바꾸면 CSP 가 요청을 막는데, isWorkerConfigured() 는 이
 // 문자열만 보고 판단하므로 "설정된 것"으로 오판해 fetch 를 시도했다가
 // CSP 위반으로 실패한다 — tryWorker() 의 catch 가 이것도 네트워크 실패와
 // 똑같이 처리해 폴백으로 넘어가므로 사용자 경험은 안전하지만, 의도한 대로
 // Worker 를 쓰고 있는지는 README 4단계대로 두 곳 다 바꿨는지 확인해야 안다).
-const WORKER_URL = "https://REPLACE_WITH_YOUR_WORKER_URL";
+const WORKER_URL = "https://mouigosa-intake.amid815.workers.dev";
 
 // 이 자리표시자로 남아있는 동안은 fetch 자체를 시도하지 않는다 — 어차피
 // 실패할 요청을 매번 던져 콘솔에 오류만 쌓는 대신, "미설정"임을 바로

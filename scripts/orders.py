@@ -17,6 +17,54 @@ BUY3_RATIO = 0.88        # -12%
 TAKE_PROFIT_RATIO = 1.053    # +5.3%
 STOP_LOSS_RATIO = 0.91       # -9%, 3차 체결 후에만 발동
 
+# KRX 호가단위. **2026-08-20 실측** — 일봉 OHLC 60거래일치를 16종목에서
+# 받아 "가격의 95% 이상이 배수인 가장 큰 값"으로 역산했다. 밴드 경계를
+# 걸친 종목(예: 4,115~10,050)은 낮은 밴드의 고운 호가가 섞여 나오는데,
+# 그건 표와 모순이 아니라 표와 일치하는 결과다.
+#
+# **분봉으로 재보지 말 것.** api.stock.naver.com 의 분봉 currentPrice 는
+# 그 분의 평균값으로 보이며, 삼성전자에서 250원 단위라는 틀린 답이 나온다.
+# 실제 체결가는 일봉 OHLC 다.
+#
+# ETF 는 실측상 더 고운 호가(1~5원)를 쓰지만 여기서는 같은 표를 적용한다 —
+# 표의 모든 값이 5의 배수라 ETF 에 써도 **주문 가능한 가격**이 나오고,
+# 다만 필요보다 성길 뿐이다. 이 계층에는 ETF 여부를 알 방법이 없다.
+_TICKS = ((2000, 1), (5000, 5), (20000, 10), (50000, 50),
+          (200000, 100), (500000, 500))
+_TICK_TOP = 1000        # 500,000원 이상
+
+
+def tick_size(price: int) -> int:
+    """그 가격대의 호가단위."""
+    for upper, t in _TICKS:
+        if price < upper:
+            return t
+    return _TICK_TOP
+
+
+def floor_tick(price: int) -> int:
+    """매수 지정가 — 목표가보다 더 내지 않도록 내린다.
+
+    내림은 밴드를 넘어가지 않는다(위쪽으로 감) — tick_size(price) 로 구한
+    호가단위 그대로 내리면 항상 같은 밴드 안에 남거나 더 낮은 값이 된다.
+    """
+    t = tick_size(price)
+    return (price // t) * t
+
+
+def ceil_tick(price: int) -> int:
+    """매도 지정가 — 목표가보다 덜 받지 않도록 올린다.
+
+    올림은 밴드 경계를 넘을 수 있다(예: 199,980 → 200,000). tick_size 는
+    **원래 가격**의 밴드로 구하고, 그 호가단위로 올린 결과가 다음 밴드로
+    넘어가도 그대로 둔다 — 넘어간 결과 자체가 그 다음 밴드의 배수이기도
+    해서(모든 밴드 경계값이 위 밴드의 호가단위의 배수다) 주문 가능성은
+    깨지지 않는다. 예: tick_size(199,980)=100 → 200,000 은 100 의 배수이자
+    500 의 배수(다음 밴드 200,000 의 호가단위)이기도 하다.
+    """
+    t = tick_size(price)
+    return -((-price) // t) * t
+
 
 def plan(first_price: int) -> dict:
     """1차 매수가로부터 2차·3차 지정가를 산출한다.
@@ -41,10 +89,14 @@ def plan(first_price: int) -> dict:
     이 붕괴는 즉시 손절로만 나타나지 않는다 — 8원처럼 더 내려가면 반올림이
     익절선을 관측가 자체로 무너뜨려, 하락한 종목이 가짜 승리(익절)로
     기록될 수도 있다(`plan(8)`, `take_profit([8])` 로 확인 가능).
+
+    **호가단위로 한 번 더 내린다** (2026-08-20) — "지정가를 걸었다면" 이
+    성립하려면 그 가격에 실제로 주문이 존재할 수 있어야 한다. 매수라서
+    내리는 쪽(floor_tick)을 쓴다 — 목표가보다 더 내지 않는다.
     """
     return {
-        "buy2": round(first_price * BUY2_RATIO),
-        "buy3": round(first_price * BUY3_RATIO),
+        "buy2": floor_tick(round(first_price * BUY2_RATIO)),
+        "buy3": floor_tick(round(first_price * BUY3_RATIO)),
     }
 
 
@@ -64,8 +116,13 @@ def average(prices: list) -> int:
 
 
 def take_profit(prices: list) -> int:
-    """익절선. 평균가 기준이라 물타기하면 내려온다 — 그게 물타기의 목적이다."""
-    return round(average(prices) * TAKE_PROFIT_RATIO)
+    """익절선. 평균가 기준이라 물타기하면 내려온다 — 그게 물타기의 목적이다.
+
+    호가단위로 **올린다**(ceil_tick) — 매도라서 목표가보다 덜 받지 않는
+    쪽으로 반올림한다. 승률 통계 입장에서는 보수적이다: 익절선이 올라가서
+    익절이 조금 더 어려워지지, 쉬워지지 않는다.
+    """
+    return ceil_tick(round(average(prices) * TAKE_PROFIT_RATIO))
 
 
 def stop_loss(prices: list) -> int | None:
@@ -77,10 +134,14 @@ def stop_loss(prices: list) -> int | None:
     체결이 아예 없어도(`prices == []`) None 이다 — `len(prices) < 3` 에
     걸려 average() 의 빈 리스트 거부(ValueError)까지 가지 않는다. 손절선이
     없다는 결론은 같지만 경로가 다르다는 뜻이라 여기 적어둔다.
+
+    호가단위로 **올린다**(ceil_tick) — 매도 주문이라 floor 가 아니라 ceil.
+    이 방향도 설계 §9 "승률을 부풀리지 않는 쪽" 과 맞는다: 손절선이
+    올라가면 하락 중 더 일찍 걸려 손절이 늘지, 줄지 않는다.
     """
     if len(prices) < 3:
         return None
-    return round(average(prices) * STOP_LOSS_RATIO)
+    return ceil_tick(round(average(prices) * STOP_LOSS_RATIO))
 
 
 def replay(ladder: dict, filled: list, minutes: list,

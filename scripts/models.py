@@ -89,6 +89,33 @@ def _text(v, n, *, default="", strict=False):
     return v[:n]
 
 
+def _orders_sane(ords: dict, buys: list) -> bool:
+    """저장된 지정가 사다리가 쓸 수 있는 모양인가 — normalize 전용 검사.
+
+    `_price` 를 쓰지 않고 직접 보는 이유: `_price` 는 반올림해서 **고쳐
+    돌려준다**. 여기서는 고치면 안 된다 — 저장된 값이 소수라는 것 자체가
+    손편집 흔적이고, normalize 의 계약은 "고치지 말고 격리"다
+    (buys[0].price 를 다루는 방식과 같다).
+
+    비어 있는 `{}` 는 여기 오지 않는다(호출부가 거른다) — 아직 사다리가
+    안 잡힌 정상 기록이다.
+    """
+    for k in ("buy2", "buy3"):
+        v = ords.get(k)
+        # bool 은 파이썬에서 int 다 — True 가 1원짜리 주문가로 통과한다.
+        if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+            return False
+    if ords["buy3"] >= ords["buy2"]:
+        return False   # 물타기는 아래로만 간다
+    if buys and isinstance(buys[0], dict):
+        first = buys[0].get("price")
+        if isinstance(first, int) and ords["buy2"] >= first:
+            return False   # 2차가 1차보다 높으면 매수 즉시 체결된다
+    if "customized" in ords and not isinstance(ords["customized"], bool):
+        return False
+    return True
+
+
 def normalize(raw, dropped=None) -> dict:
     """읽어온 것을 믿지 않는다. 모양이 틀린 항목은 조용히 버리고 dropped 에 기록한다.
 
@@ -192,7 +219,26 @@ def normalize(raw, dropped=None) -> dict:
         # 격리한다. 특히 `auto` 는 불리언이 아니면 반드시 막아야 한다 —
         # 문자열 "false" 는 파이썬에서 **참**이라, 예외 지정이 조용히
         # 무시되면 사용자가 막았다고 믿는 종목이 자동 매매된다.
-        if not isinstance(p.get("orders", {}), dict):
+        # ── orders 내용까지 본다 (2026-08-20 리뷰) ──────────────────────
+        # buys[0].price 는 소수까지 잡아내면서("손으로 고친 흔적") orders 의
+        # 가격은 그냥 통과시키고 있었다. 그런데 그 값은 **같은 돈 계산**에
+        # 쓰인다 — orders.replay 가 체결가로 그대로 기록한다.
+        #
+        # 실측(2026-08-20): 문자열 가격은 replay 에서 TypeError, 키 누락은
+        # KeyError 로 **그날 자동 체결 전체를 중단**시킨다(autofill.run 의
+        # touched() 가 fetch_minute 의 try/except 밖에 있다). 더 나쁜 건
+        # 조용한 쪽 — 1차가보다 높은 사다리를 넣으면 10만원짜리 종목이
+        # 58만원에 손절됐다고 기록되고, 음수 사다리는 2차·3차가 영영 안
+        # 걸려 손절이 아예 안 켜진다(익절로만 닫혀 승률이 부풀려진다).
+        #
+        # 쓰기 쪽(apply_orders)이 이미 막지만, normalize 가 지키는 건
+        # **손편집된 파일을 읽는 경로**다 — 그게 이 함수의 존재 이유다.
+        ords = p.get("orders", {})
+        if not isinstance(ords, dict):
+            if dropped is not None:
+                dropped.append(p)
+            continue
+        if ords and not _orders_sane(ords, p.get("buys") or []):
             if dropped is not None:
                 dropped.append(p)
             continue

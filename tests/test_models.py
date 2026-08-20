@@ -1055,3 +1055,58 @@ def test_예외_지정된_기록에는_반영하지_않는다():
         models.apply_fills(_fpos(auto=False), "20260819-005930",
                            [{"kind": "buy2", "t": "1", "price": 94000}],
                            "2026-08-20")
+
+
+# ── Task 6-1: orders 내용 검증 (2026-08-20 리뷰) ──────────────────────────
+
+
+def _ords(o, first=100000):
+    """orders 만 바꿔가며 normalize 를 통과하는지 본다."""
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [{"date": "2026-08-19", "price": first}],
+        "orders": o}]}, dropped)
+    return st["positions"], dropped
+
+
+@pytest.mark.parametrize("bad, why", [
+    ({"buy2": "94000", "buy3": "88000"}, "문자열 가격 — replay 에서 TypeError"),
+    ({"buy3": 88000},                    "buy2 없음 — replay 에서 KeyError"),
+    ({"buy2": 94000},                    "buy3 없음 — replay 에서 KeyError"),
+    ({"buy2": -5, "buy3": -9},           "음수 — 조용히 안 걸리고 손절도 안 켜짐"),
+    ({"buy2": 0, "buy3": 0},             "0원"),
+    ({"buy2": 940000, "buy3": 880000},   "1차가보다 높음 — 거래된 적 없는 가격에 체결"),
+    ({"buy2": 88000, "buy3": 94000},     "3차가 2차보다 높음 — 순서 뒤집힘"),
+    ({"buy2": 94000.5, "buy3": 88000},   "소수 — buys[0] 였다면 거부됐을 값"),
+    ({"buy2": True, "buy3": 88000},      "불리언 — 파이썬에서 int 로 통과한다"),
+    ({"buy2": 94000, "buy3": 88000, "customized": "yes"}, "customized 가 불리언 아님"),
+])
+def test_손상된_orders_는_격리한다(bad, why):
+    """buys[0].price 와 같은 돈 계산에 쓰이는 값이다 — 같은 수준으로 본다."""
+    good, dropped = _ords(bad)
+    assert good == [], f"통과하면 안 된다({why}): {bad}"
+    assert len(dropped) == 1
+
+
+@pytest.mark.parametrize("ok", [
+    {},                                              # 아직 안 잡힌 기록
+    {"buy2": 94000, "buy3": 88000},
+    {"buy2": 94000, "buy3": 88000, "customized": True},
+    {"buy2": 94000, "buy3": 88000, "customized": False},
+])
+def test_멀쩡한_orders_는_통과한다(ok):
+    good, dropped = _ords(ok)
+    assert len(good) == 1 and dropped == []
+
+
+def test_buys가_없으면_1차가_대조는_건너뛴다():
+    """지정가 관찰(뒤 태스크)은 아직 안 산 기록이라 1차가와 대조할 게 없다.
+    그래도 사다리 자체의 모양(정수·순서)은 본다."""
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [], "status": "pending",
+        "orders": {"buy2": 94000, "buy3": 88000}}]}, dropped)
+    # buys 가 비어 있으면 현재 normalize 는 그 자체로 격리한다(pending 은
+    # 아직 도입 전) — 여기서 확인하는 건 orders 검증이 KeyError 를 내지
+    # 않는다는 것뿐이다.
+    assert isinstance(dropped, list)

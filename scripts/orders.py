@@ -37,6 +37,10 @@ def plan(first_price: int) -> dict:
     models.apply_buy 가 통째로 실패해 그 종목을 아예 관측할 수 없게 되기
     때문이다 — 정리매매·관리종목이 아니면 닿지 않는 영역이라, 거부보다
     기록해두는 쪽을 골랐다.
+
+    이 붕괴는 즉시 손절로만 나타나지 않는다 — 8원처럼 더 내려가면 반올림이
+    익절선을 관측가 자체로 무너뜨려, 하락한 종목이 가짜 승리(익절)로
+    기록될 수도 있다(`plan(8)`, `take_profit([8])` 로 확인 가능).
     """
     return {
         "buy2": round(first_price * BUY2_RATIO),
@@ -79,18 +83,38 @@ def stop_loss(prices: list) -> int | None:
     return round(average(prices) * STOP_LOSS_RATIO)
 
 
-def replay(first_price: int, filled: list, minutes: list, exempt: bool = False) -> list:
+def replay(ladder: dict, filled: list, minutes: list,
+           since: str | None = None, exempt: bool = False) -> list:
     """분봉을 시간순으로 재생해 체결 목록을 돌려준다.
 
-    `minutes` 는 시간 오름차순이고, **관측 시각 이후만** 들어온다(자르는
-    건 autofill 몫). 저녁에 종가 보고 넣은 관측이 그날 오전 고가로
-    익절되면 승률이 부풀려지기 때문이다(설계 §5).
+    `ladder` 는 이 기록에 **저장된** 2차·3차 지정가(`positions.json` 의
+    `orders`)다. 1차가로부터 매번 다시 계산하지 않는다 — plan() 독스트링이
+    말하는 그 이유 그대로다. amend 로 1차가를 고치면 이미 체결된 물타기의
+    근거 가격이 소급해서 바뀌고, 사용자가 손으로 지정한 사다리
+    (`customized`)는 아예 무시된다.
 
-    각 분봉에서 고가·저가만 본다 — 그 분 안에서 어디까지 갔는지가 체결
-    판정의 전부다. 분 안에서의 순서(고가가 먼저인지 저가가 먼저인지)는
-    알 수 없다. 매수는 저가로, 매도는 고가·저가로 판정하되 **매수를 먼저**
-    본다 — 갭하락으로 2차·3차가 같은 분에 체결되는 경우(설계 §4-1)를
-    실제 지정가 주문과 같게 처리하기 위함이다.
+    `since` 는 **재생 시작 시각**("YYYYMMDDHHMM")이다. 이 시각 이하의 분봉은
+    건너뛴다. 호출자가 관측 시각과 **마지막 체결 시각 중 나중**을 넘겨야
+    한다 — 관측 시각만 넘기면 다음 사고가 난다(2026-08-20 실측 재현):
+
+        close.yml 은 하루 두 번 돈다(cron "0 8,23"). 두 번째 실행은 개장
+        전이라 **같은 거래일을 다시** 처리하는데, 그때 filled 에는 이미
+        그날 체결된 매수가 들어 있다. 그러면 체결 이전 시각의 분봉이
+        **내려간 익절선**으로 평가되어, 떨어지는 종목이 +5.3% 승리로
+        기록된다.
+
+    `filled` 는 비어 있으면 안 된다. 아직 1차도 안 산 기록(pending)은 이
+    함수의 대상이 아니다 — 그건 지정가 관찰이 따로 처리한다.
+
+    각 분봉에서 고가·저가만 본다. 분 안에서의 순서는 알 수 없다. 매수는
+    저가로, 매도는 고가·저가로 판정하되 **매수를 먼저** 본다 — 갭하락으로
+    2차·3차가 같은 분에 체결되는 경우(설계 §4-1)를 실제 지정가 주문과 같게
+    처리하기 위함이다.
+
+    **한 분봉이 손절선과 익절선을 둘 다 스치면 손절로 본다.** 어느 쪽이
+    먼저였는지 알 수 없고, 설계 §9 가 그 모호함에 대해 "승률을 부풀리지
+    않는 쪽"을 규칙으로 정해뒀다. 그렇게 되려면 1분 안에 15.7% 를 출렁여야
+    해서 드물지만, 규칙이 있는데 반대로 두면 안 된다.
 
     **각 주문은 자기 체결 이후의 분봉만 본다.** 이게 이 함수에서 가장
     중요한 규칙이다(설계 §4-1). 3차가 체결되는 순간 익절선이 내려앉는데,
@@ -102,27 +126,31 @@ def replay(first_price: int, filled: list, minutes: list, exempt: bool = False) 
     `exempt` 는 예외 버튼이다. 켜져 있으면 아무것도 체결하지 않는다 —
     자동매도뿐 아니라 자동매수(2차·3차)도 같이 멈춘다(설계 §8).
     """
+    if not filled:
+        raise ValueError("1차 매수가 없다 — 아직 안 산 기록(pending)은 replay 대상이 아니다")
     if exempt:
         return []
-    p = plan(first_price)
-    got = list(filled)
+    held = list(filled)
     out = []
     for m in minutes:
+        if since is not None and m["t"] <= since:
+            continue
         # 매수 먼저. 갭하락으로 2차·3차가 같은 분에 둘 다 체결될 수 있다 —
         # 지정가 주문의 실제 동작이라 허용하되 순서를 보존한다(설계 §4-1).
-        if len(got) == 1 and m["low"] <= p["buy2"]:
-            got.append(p["buy2"])
-            out.append({"kind": "buy2", "t": m["t"], "price": p["buy2"]})
-        if len(got) == 2 and m["low"] <= p["buy3"]:
-            got.append(p["buy3"])
-            out.append({"kind": "buy3", "t": m["t"], "price": p["buy3"]})
+        if len(held) == 1 and m["low"] <= ladder["buy2"]:
+            held.append(ladder["buy2"])
+            out.append({"kind": "buy2", "t": m["t"], "price": ladder["buy2"]})
+        if len(held) == 2 and m["low"] <= ladder["buy3"]:
+            held.append(ladder["buy3"])
+            out.append({"kind": "buy3", "t": m["t"], "price": ladder["buy3"]})
 
-        tp = take_profit(got)
-        if m["high"] >= tp:
-            out.append({"kind": "take_profit", "t": m["t"], "price": tp})
-            break
-        sl = stop_loss(got)
+        # 손절을 먼저 본다 — 위 독스트링 "둘 다 스치면 손절" 참조.
+        sl = stop_loss(held)
         if sl is not None and m["low"] <= sl:
             out.append({"kind": "stop_loss", "t": m["t"], "price": sl})
+            break
+        tp = take_profit(held)
+        if m["high"] >= tp:
+            out.append({"kind": "take_profit", "t": m["t"], "price": tp})
             break
     return out

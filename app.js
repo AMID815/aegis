@@ -1171,18 +1171,41 @@ async function tryWorker(payload, display) {
       signal: controller.signal,
     });
   } catch (e) {
-    // fetch() 의 TypeError 는 DNS 실패·CORS 차단·CSP 차단(자리표시자
-    // 미교체 포함)·오프라인·타임아웃(AbortError 도 여기로 온다)을 전부
-    // 구분 없이 이 하나로 던진다 — 브라우저가 원래 그렇다. 전부 같은
-    // "network" 사유로 묶는다(어차피 사용자가 할 수 있는 다음 행동은
-    // 같다: 폴백으로 진행하거나 나중에 다시 시도).
+    // 2026-08-20 보안 리뷰 C1 — AbortError(타임아웃)를 "network"에 같이
+    // 묶었던 게 원인이었다. "network"는 자동으로 깃허브 폴백을 쓰는데,
+    // 타임아웃은 "요청이 안 갔다"가 아니라 **결과를 모른다**는 뜻이다 —
+    // Worker 가 GitHub 이슈 생성까지 이미 마쳤는데 응답만 못 받았을 수
+    // 있다. 이 상태에서 자동으로 깃허브 이슈를 또 열면 **같은 제출이
+    // 두 번** 나갈 수 있다. sell 은 payload 에 대상 id 가 없어(onSubmit
+    // 참조) apply_sell 이 매번 "이 코드의 open 중 가장 오래된 것"을 새로
+    // 찾으므로, 보유가 2건 이상이면 두 번째 제출이 **거부되지 않고 다른
+    // 보유를 조용히 닫는다**(tests/test_models.py
+    // test_매도_요청이_중복되면_서로_다른_보유를_조용히_닫는다 로 고정 —
+    // 원인은 여기, 고정은 거기). 그래서 타임아웃은 "network"와 분리해
+    // 자동 폴백 목록에서 뺀다(writeRecord) — 모를 땐 자동으로 아무 것도
+    // 더 하지 않는다.
+    if (e && e.name === "AbortError") return { ok: false, reason: "timeout" };
+    // 그 외 TypeError 는 DNS 실패·CORS 차단·CSP 차단(자리표시자 미교체
+    // 포함)·오프라인처럼 요청이 애초에 나가지도 못한 경우다 — 이건 결과가
+    // 모호하지 않다(안 갔다), 그래서 계속 "network"로 묶어 자동 폴백을
+    // 쓴다.
     return { ok: false, reason: "network" };
   } finally {
     clearTimeout(timer);
   }
 
   if (resp.status === 401) return { ok: false, reason: "auth" };
-  if (!resp.ok) return { ok: false, reason: "http", status: resp.status };
+  if (!resp.ok) {
+    // 2026-08-20 보안 리뷰 I3 — Worker 가 사람이 읽을 진단(예: "Bad
+    // credentials", "시크릿이 설정되지 않았습니다")을 이미 응답 본문에
+    // 담아 보내는데, 그동안 상태코드만 보고 버렸다. PAT 만료처럼 사용자가
+    // 결국 실제로 마주칠 실패에서 "HTTP 502" 한 줄만 보여주면 무엇을
+    // 고쳐야 할지 알 길이 없다 — 본문을 최선껏 읽어 같이 넘긴다(못 읽어도
+    // 상태코드 기반 메시지로는 그대로 대체된다).
+    const data = await resp.json().catch(() => null);
+    const detail = data && typeof data.error === "string" ? data.error : undefined;
+    return { ok: false, reason: "http", status: resp.status, detail };
+  }
 
   let data;
   try {
@@ -1194,6 +1217,36 @@ async function tryWorker(payload, display) {
     return { ok: false, reason: "bad-response" };
   }
   return { ok: true, number: data.number, url: data.url };
+}
+
+// 2026-08-20 보안 리뷰 I5 — GATE_PBKDF2_HEX/GATE_PASS 어긋남을 실제 쓰기
+// 전에 알아채기 위한 최선노력 진단. payload 없이 pass 만 보내면 Worker 는
+// (worker.js) pass 부터 확인하므로: 맞으면 그 다음 검사(payload 모양)에서
+// 걸려 400, 틀리면 401 — 이 둘의 차이만으로 인증 문제인지 아닌지 구분할
+// 수 있다(둘 다 "실패"지만 이유가 다르다). Worker 코드 변경도 새 엔드포인트도
+// 필요 없다.
+//
+// 실패해도(네트워크 등) 조용히 넘어간다 — 이건 실제 제출을 막는 검사가
+// 아니라 조기 경보일 뿐이라, 여기서 뭐라 알리면 tryWorker() 가 실제 제출
+// 시점에 내는 진단과 중복되거나 어긋난 타이밍에 두 번 놀라게 한다.
+async function probeWorkerAuth() {
+  if (!isWorkerConfigured()) return;
+  const passphrase = getStoredPassphrase();
+  if (!passphrase) return;
+  try {
+    const resp = await fetch(WORKER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pass: passphrase }),   // payload 를 일부러 안 보낸다 — 위 설명 참조
+    });
+    if (resp.status === 401) {
+      addStaleMessage("Worker 인증 확인: 저장된 통과 문구가 Worker 의 GATE_PASS 설정과 다른 것 같습니다 — "
+        + "실제로 저장을 시도하기 전에 worker/README.md 3단계를 다시 확인해주세요.");
+    }
+  } catch (e) {
+    // 네트워크 실패·CSP 차단·미배포 등은 이 진단의 몫이 아니다 — 실제
+    // 제출 시 tryWorker() 가 다시 다루므로 여기서는 조용히 넘어간다.
+  }
 }
 
 // #result 를 채운다 — textContent 전용(성공 시 링크 <a> 하나만 createElement
@@ -1209,8 +1262,14 @@ function renderResult(info) {
   const REASON_MSG = {
     "not-configured": "Worker 가 아직 설정되지 않았습니다",
     network: "Worker 에 연결하지 못했습니다",
+    // 타임아웃은 "실패"가 아니라 "모름"이다(tryWorker 옆 C1 주석 참조) —
+    // 그래서 문구도 "실패했습니다"가 아니라 "이미 저장됐을 수 있다"는
+    // 가능성을 먼저 알린다. 아래 blocked 분기의 공통 접미사("아직
+    // 반영되지 않았습니다")를 이 reason 에는 안 붙인다(별도 처리, 아래).
+    timeout: "응답이 늦습니다 — 이미 저장됐을 수 있습니다. 깃허브 이슈 목록을 먼저 확인해주세요",
     auth: "패스프레이즈가 Worker 설정과 일치하지 않습니다 — 배포 시 넣은 GATE_PASS 를 확인해주세요",
-    http: "Worker 가 요청을 거부했습니다" + (info.status ? " (HTTP " + info.status + ")" : ""),
+    http: "Worker 가 요청을 거부했습니다" + (info.status ? " (HTTP " + info.status + ")" : "")
+      + (info.detail ? ": " + info.detail : ""),
     "bad-response": "Worker 응답을 이해할 수 없습니다",
   };
 
@@ -1231,13 +1290,25 @@ function renderResult(info) {
     el.appendChild(p);
   } else {   // "blocked" — 자동으로 넘기지 않고 수동 탈출구만 준다
     const p = document.createElement("p");
-    p.textContent = (REASON_MSG[info.reason] || "저장에 실패했습니다") + " — 아직 반영되지 않았습니다.";
+    // "아직 반영되지 않았습니다"는 auth/http/bad-response 에서는 사실이다
+    // (Worker 가 응답할 때까지 아무 것도 안 만들어졌거나, 거부했다). 하지만
+    // timeout 은 결과를 모르는 상태라 이 문구를 덧붙이면 방금 위에서 말한
+    // "이미 저장됐을 수 있다"와 스스로 모순된다 — timeout 은 REASON_MSG
+    // 자체가 이미 필요한 안내를 다 담고 있으므로 접미사를 안 붙인다.
+    p.textContent = REASON_MSG[info.reason] || "저장에 실패했습니다";
+    if (info.reason !== "timeout") p.textContent += " — 아직 반영되지 않았습니다.";
     el.appendChild(p);
     const a = document.createElement("a");
     a.href = issueUrl(info.title, info.payload);
     a.target = "_blank";
     a.rel = "noopener noreferrer";
-    a.textContent = "그래도 깃허브에서 직접 열기";
+    // timeout 에서는 "그래도"라는 말이 안 맞는다(이미 성공했을 수도 있는
+    // 상황에서 "그래도 열기"는 재촉하는 느낌을 준다) — 확인을 먼저
+    // 권하는 문구로 바꾼다. 링크 자체는 그대로 둔다(정말 필요하면 여전히
+    // 쓸 수 있어야 한다 — 예: 확인해보니 정말 안 갔을 때).
+    a.textContent = info.reason === "timeout"
+      ? "확인 후에도 안 갔다면 깃허브에서 직접 열기"
+      : "그래도 깃허브에서 직접 열기";
     el.appendChild(a);
   }
 }
@@ -1280,9 +1351,12 @@ async function writeRecord(payload, title, display, pending) {
       renderResult({ kind: "fallback", reason: outcome.reason });
       return { ok: true, fallback: true };
     }
-    // "auth"/"http"/"bad-response" — 자동으로 넘기지 않는다(tryWorker 옆
-    // 주석 참조). pending 탭은 안 썼으니 finally 에서 닫는다.
-    renderResult({ kind: "blocked", reason: outcome.reason, status: outcome.status, title, payload });
+    // "timeout"/"auth"/"http"/"bad-response" — 자동으로 넘기지 않는다
+    // (tryWorker 옆 C1 주석 참조). pending 탭은 안 썼으니 finally 에서 닫는다.
+    renderResult({
+      kind: "blocked", reason: outcome.reason, status: outcome.status,
+      detail: outcome.detail, title, payload,
+    });
     return { ok: false };
   } finally {
     if (pending && !tabUsed) pending.close();
@@ -1627,11 +1701,25 @@ function revealContent() {
 
 function unlockAndStart() {
   document.getElementById("gate").hidden = true;
+  // 2026-08-20 보안 리뷰 minor — #gate 를 숨겨도 #gate-pass 의 required 는
+  // 그대로 켜져 있었다(index.html 정적 마크업). 이 입력란 자체는 숨은 뒤
+  // 프로그램적으로 다시 submit 되지 않으니 당장 아무 것도 막지는 않지만
+  // (별도 폼, dispatchEvent 로 우회하는 코드도 없다), tests/test_index_html.py
+  // 가 정적으로 막는 바로 그 모양(hidden 조상 아래 살아있는 required)을
+  // 런타임에 만들어낸다 — 정적 가드가 못 보는 자리에서. 커튼을 나가는
+  // 김에 같이 끈다.
+  document.getElementById("gate-pass").required = false;
   revealContent();
   // main() 이 여기서만 불린다 — positions.json/quotes.json/master.json
   // 요청은 전부 main() 안에 있으므로, 커튼을 통과한 뒤에만 이 줄에
   // 닿는다는 사실 자체가 "통과 전엔 안 받는다"는 요구를 만족시킨다.
   main().catch(reportFatal);   // 항목 13, F1 과 같은 오류 경계
+  // 2026-08-20 보안 리뷰 I5 — GATE_PBKDF2_HEX(페이지)와 GATE_PASS(Worker)는
+  // 같은 문구에서 나와야 하지만 서로 다른 도구(커밋 vs wrangler secret)로
+  // 따로 설정된다 — 둘이 어긋나도 이 시점엔 아무 신호가 없고, 사용자는
+  // 첫 실제 쓰기 시도에서야(#result 의 "blocked"/auth) 알게 된다. main()
+  // 을 막지 않는 최선노력 진단으로 그 지연을 줄인다 — await 하지 않는다.
+  probeWorkerAuth();
 }
 
 let gateBusy = false;   // 해시 계산(await) 도중 중복 제출 방지

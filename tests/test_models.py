@@ -105,6 +105,55 @@ def test_같은_종목_여러_보유_중_가장_오래된_것이_매도된다():
     assert len(still_open) == 1 and still_open[0]["buys"][0]["date"] == "2026-08-20"
 
 
+def test_매도_요청이_중복되면_서로_다른_보유를_조용히_닫는다():
+    """2026-08-20 보안 리뷰 C1 — 알고 고정해두는 테스트다(고치는 테스트가
+    아니다). 매도 payload 에는 대상 id 가 없다({op:"sell", code, price,
+    date} 뿐 — app.js onSubmit 참조). 그래서 apply_sell 은 호출될 때마다
+    "이 코드의 open 중 가장 오래된 것"을 새로 찾는다(바로 위 테스트가
+    확인하는 그 규칙) — 정상 경로(사용자가 같은 종목을 실제로 두 번 사고
+    두 번 판 것)에서는 맞는 동작이지만, **같은 제출이 실수로 두 번 나가면**
+    (예: Worker 응답이 타임아웃돼 결과를 모르는 채 재시도/폴백한 경우)
+    둘째 매도는 거부되지 않고 **다른(첫 번째와 무관한) 보유를 조용히
+    닫는다** — 그 보유는 사용자가 이번 제출로 낸 적 없는 가격/날짜로
+    종결된다.
+
+    이 위험은 손편집 없이 정상 UI 경로로도 닿는다 — 매수를 잘못 고른 뒤
+    "고치기"(amend)로 code 를 다른 보유와 같게 바꾸면 한 코드에 open 이
+    2건 이상 남을 수 있다.
+
+    실제 방어는 여기(models.py)가 아니라 app.js 쪽에 있다 — 타임아웃
+    (AbortError)을 "network"(자동 폴백 대상)와 분리해 자동 재시도/폴백을
+    하지 않는 것(app.js tryWorker의 C1 주석 참조). code 하나만으로 대상을
+    고르는 이 계약 자체는 정상 매도에는 맞는 동작이므로 models.py 는
+    안 바꾼다 — 이 테스트는 그 결정을 명시적으로 남겨, 미래에 "당연히
+    버그겠지"하고 조용히 계약을 바꾸는 일이 없게 한다.
+    """
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 240000, "date": "2026-08-01"})
+    d = models.apply_buy(d, {
+        "code": "005930", "name": "삼성전자", "price": 250000, "date": "2026-08-10"})
+
+    # 첫 매도 — 더 오래된(08-01) 보유가 닫힌다.
+    d = models.apply_sell(d, {"code": "005930", "price": 260000, "date": "2026-08-15"})
+    closed_after_first = [p for p in d["positions"] if p["status"] == "closed"]
+    assert len(closed_after_first) == 1
+    assert closed_after_first[0]["buys"][0]["date"] == "2026-08-01"
+
+    # "중복" 매도 — 같은 제출이 실수로 두 번 나간 상황을 흉내낸다. 거부
+    # 되지 않는다: id 가 없으므로 이번엔 남은 유일한 open(08-10)이 대신
+    # 닫힌다 — apply_sell 은 예외를 내지 않는다(정상 매도와 구분할 방법이
+    # 이 함수 안에는 없다).
+    d = models.apply_sell(d, {"code": "005930", "price": 999999, "date": "2026-08-16"})
+    closed_after_second = [p for p in d["positions"] if p["status"] == "closed"]
+    assert len(closed_after_second) == 2
+
+    # 사용자가 08-10 매수분을 위해 낸 적 없는 가격/날짜로 그 기록이 닫혔다
+    # — 이게 이 결함의 실제 피해 모양이다.
+    second_closed = next(p for p in closed_after_second if p["buys"][0]["date"] == "2026-08-10")
+    assert second_closed["exits"][0]["price"] == 999999
+    assert second_closed["exits"][0]["date"] == "2026-08-16"
+
+
 def test_가격이_불리언이면_거부한다():
     with pytest.raises(models.RejectedError):
         models._price(True)

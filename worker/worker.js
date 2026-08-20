@@ -171,11 +171,26 @@ export default {
       return json(500, { ok: false, error: "Worker 시크릿이 설정되지 않았습니다." });
     }
 
+    // 2026-08-20 보안 리뷰 minor — Content-Length 를 먼저 본다. request.text()
+    // 로 본문 전체를 다 받은 뒤에야 길이를 재면, 무료 플랜의 요청당 CPU
+    // 예산(10ms) 안에서 수 MB 짜리 본문을 디코딩하다가 이 검사에 닿기도
+    // 전에 CPU 리미터가 먼저 끊어버릴 수 있다 — 그러면 런타임이 CORS
+    // 헤더 없는 자체 오류를 내고, 브라우저는 이걸 "network"로 오판해
+    // (tryWorker) 조용히 깃허브 폴백으로 넘어간다. 헤더 단계에서 먼저
+    // 걸러내면 본문을 아예 안 읽으므로 이 경로 자체가 생기지 않는다.
+    // (Content-Length 를 안 보내는 요청도 있을 수 있어 — 아래 raw.length
+    // 검사는 그 경우를 위한 방어로 그대로 남긴다.)
+    const declaredLength = Number(request.headers.get("content-length") || 0);
+    if (declaredLength > MAX_PAYLOAD_CHARS + 200) {
+      return json(400, { ok: false, error: "요청이 너무 큽니다." });
+    }
+
     let body;
     try {
       const raw = await request.text();
       if (raw.length > MAX_PAYLOAD_CHARS + 200) {
         // +200 은 {pass, payload, display} 감싸는 JSON 오버헤드용 여유.
+        // Content-Length 헤더가 없거나 거짓이었던 경우의 2차 방어.
         return json(400, { ok: false, error: "요청이 너무 큽니다." });
       }
       body = JSON.parse(raw);
@@ -256,7 +271,21 @@ export default {
       });
     }
 
-    const created = await ghResp.json();
+    // 2026-08-20 보안 리뷰 I2 — 여기서 그냥 await 하다 파싱이 던지면(깃허브가
+    // 201 인데 본문이 JSON 이 아닌 드문 경우) 이 fetch 핸들러 자체가 예외로
+    // 끝나 런타임이 자체 오류 페이지를 낸다 — 그 페이지엔 CORS 헤더가 없어
+    // 브라우저가 응답을 아예 못 읽고, 페이지(app.js)는 이걸 "network"로
+    // 오판해 **이미 만들어진 이슈에 대해** 깃허브 폴백으로 또 하나를 연다
+    // (중복 생성). 이슈는 이미 성공적으로 만들어졌으므로(ghResp.ok 를
+    // 통과했다) 실패로 되돌리지 않는다 — number/url 을 못 읽었을 뿐이라고
+    // 정직하게 반영한다. 클라이언트의 bad-response 분기가 이미 이 모양
+    // (number 가 숫자가 아님)을 "blocked, 자동 폴백 없음"으로 처리한다.
+    let created = {};
+    try {
+      created = await ghResp.json();
+    } catch (e) {
+      console.error("이슈는 생성됐으나 응답 파싱 실패:", e);
+    }
     return json(201, {
       ok: true,
       number: created.number,

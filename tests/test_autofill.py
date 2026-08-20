@@ -132,3 +132,130 @@ def test_체결_시각이_없는_추가매수는_무시한다():
              buys=[{"date": "2026-08-19", "price": 100000},
                    {"date": "2026-08-19", "price": 94000}])
     assert autofill.since_for(p) == "202608191530"
+
+
+# ── run() ───────────────────────────────────────────────────────────────
+
+class FakeGH:
+    """gh 모듈 대역. 쓰기를 가로채 무엇이 쓰였는지 본다."""
+
+    def __init__(self, state):
+        self.state = state
+        self.writes = []
+        self.fail_write = False
+
+    def read_json(self, path, default=None, strict=False):
+        return self.state, "sha-1"
+
+    def write_json(self, path, body, sha, message):
+        if self.fail_write:
+            raise RuntimeError("409 충돌")
+        self.writes.append((path, body, message))
+        self.state = body
+
+
+def test_체결되면_positions에_쓴다(monkeypatch):
+    fake = FakeGH(_state())
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute",
+                        lambda code, day: [{"t": "202608200931",
+                                            "high": 106000, "low": 99000}])
+    rc = autofill.run({"005930": {"20260820": {"high": 106000, "low": 99000}}},
+                      "2026-08-20")
+    assert rc == 0
+    assert len(fake.writes) == 1
+    p = fake.writes[0][1]["positions"][0]
+    assert p["status"] == "closed"
+    assert p["exits"][0]["reason"] == "자동익절"
+    assert p["exits"][0]["price"] == 105300
+
+
+def test_안_닿으면_분봉을_요청하지도_쓰지도_않는다(monkeypatch):
+    calls = []
+    fake = FakeGH(_state())
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute",
+                        lambda code, day: calls.append(code) or [])
+    rc = autofill.run({"005930": {"20260820": {"high": 101000, "low": 99000}}},
+                      "2026-08-20")
+    assert rc == 0
+    assert calls == []
+    assert fake.writes == []
+
+
+def test_이미_그날_체결된_구간은_다시_재생하지_않는다(monkeypatch):
+    """하루 두 번 도는 cron 의 두 번째 실행 — 모듈 독스트링의 그 사고.
+
+    2차가 10:00 에 체결돼 있는 상태로 그날을 다시 처리한다. 09:30 분봉의
+    고가가 (내려간) 익절선을 넘지만, since 가 10:00 이라 잘려서 체결이
+    나면 안 된다.
+    """
+    p = _pos(observed_at="2026-08-18T15:30",
+             buys=[{"date": "2026-08-18", "price": 100000},
+                   {"date": "2026-08-19", "price": 94000,
+                    "kind": "buy2", "t": "202608191000", "auto": True}])
+    fake = FakeGH({"schema": 1, "positions": [p]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute", lambda code, day: [
+        {"t": "202608190900", "high": 101000, "low": 100000},
+        {"t": "202608190930", "high": 103000, "low": 101000},
+        {"t": "202608191000", "high":  99000, "low":  94000},
+        {"t": "202608191530", "high":  95000, "low":  94000},
+    ])
+    rc = autofill.run({"005930": {"20260819": {"high": 103000, "low": 94000}}},
+                      "2026-08-19")
+    assert rc == 0
+    assert fake.writes == [], f"소급 체결이 났다: {fake.writes}"
+
+
+def test_분봉_조회_실패는_그_종목만_건너뛴다(monkeypatch):
+    """한 종목 실패가 나머지의 체결까지 막으면 안 된다. 읽기 실패라
+    종료코드도 더럽히지 않는다 — close.py 의 관례와 같다."""
+    from scripts import naver as naver_mod
+
+    def boom(code, day):
+        raise naver_mod.EmptyParseError("분봉 결과 0건")
+
+    fake = FakeGH(_state())
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute", boom)
+    rc = autofill.run({"005930": {"20260820": {"high": 106000, "low": 99000}}},
+                      "2026-08-20")
+    assert fake.writes == []
+    assert rc == 0
+
+
+def test_쓰기_실패는_종료코드에_반영된다(monkeypatch):
+    fake = FakeGH(_state())
+    fake.fail_write = True
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute",
+                        lambda code, day: [{"t": "202608200931",
+                                            "high": 106000, "low": 99000}])
+    rc = autofill.run({"005930": {"20260820": {"high": 106000, "low": 99000}}},
+                      "2026-08-20")
+    assert rc == 1
+
+
+def test_손상된_파일에는_아무것도_쓰지_않는다(monkeypatch):
+    """positions.json 은 다시 만들 수 없다 — intake·close 와 같은 태도."""
+    fake = FakeGH({"schema": 1, "positions": [{"code": "망가짐"}]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    rc = autofill.run({}, "2026-08-20")
+    assert fake.writes == []
+    assert rc == 0
+
+
+def test_저장된_사다리를_쓴다(monkeypatch):
+    """사용자가 손으로 고친 사다리(customized)를 무시하면 안 된다."""
+    fake = FakeGH(_state(orders={"buy2": 95000, "buy3": 90000,
+                                 "customized": True}))
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute",
+                        lambda code, day: [{"t": "202608200931",
+                                            "high": 99000, "low": 94000}])
+    rc = autofill.run({"005930": {"20260820": {"high": 99000, "low": 94000}}},
+                      "2026-08-20")
+    assert rc == 0
+    p = fake.writes[0][1]["positions"][0]
+    assert p["buys"][1]["price"] == 95000   # 기본값 94,000 이 아니다

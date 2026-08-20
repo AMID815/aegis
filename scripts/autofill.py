@@ -102,3 +102,81 @@ def touched(bar: dict, ords: dict, filled: list) -> bool:
 
 def filled_prices(p: dict) -> list:
     return [b["price"] for b in p["buys"]]
+
+
+def run(bars: dict, day: str) -> int:
+    """하루치 집행. `bars` 는 close.py 가 이미 받아둔 일봉이다.
+
+    종료코드 관례는 close.py 와 같다 — **읽기 실패는 0, 쓰기 실패는 1.**
+    네이버 타임아웃 같은 "매번 벌어지는 일"까지 실패로 표시하면 정작
+    쓰기가 실패하는(진짜 봐야 할) 신호를 무시하게 훈련시킨다.
+
+    기록 하나마다 따로 읽고 따로 쓴다. 한 번에 모아 쓰면 그 커밋 하나가
+    409 로 실패했을 때 그날 체결 전체를 잃는데, 나눠 쓰면 실패한 기록만
+    다음 실행이 다시 잡는다(분봉 창 7거래일 안이면 복구된다).
+    """
+    key = day.replace("-", "")
+    problems = []
+    done = 0
+
+    try:
+        state, _ = gh.read_json(POSITIONS, default=models.empty_state())
+    except Exception as e:
+        print(f"[경고] positions.json 조회 실패: {type(e).__name__}: {e} — 자동 체결을 건너뛴다")
+        return 0
+
+    bad = []
+    try:
+        state = models.normalize(state, bad)
+    except models.RejectedError as e:
+        print(f"[중단] positions.json 스키마를 알 수 없다: {e}")
+        return 0
+    if bad:
+        # positions.json 은 다시 만들 수 없는 파일이다. 손상 항목이 있으면
+        # 아무것도 쓰지 않는다 — intake.py·close.py 와 같은 태도.
+        print(f"[중단] 해석 불가 항목 {len(bad)}건 — 자동 체결을 건너뛴다")
+        return 0
+
+    for p in candidates(state):
+        bar = bars.get(p["code"], {}).get(key)
+        if bar is None:
+            continue
+        filled = filled_prices(p)
+        if not touched(bar, p["orders"], filled):
+            continue
+
+        try:
+            minutes = naver.fetch_minute(p["code"], day)
+        except Exception as e:
+            # 분봉 창(약 7거래일)을 넘겼거나 네트워크 실패다. 한 종목의
+            # 실패가 나머지 종목의 체결까지 막으면 안 된다. 읽기 실패라
+            # 종료코드는 더럽히지 않는다 — 다음 실행이 다시 잡는다.
+            print(f"[경고] 분봉 실패 {p['code']} {day}: {type(e).__name__}: {e} — 건너뛴다")
+            continue
+
+        # `since` 가 이 호출의 핵심 방어다 — since_for() 독스트링 참조.
+        # 저장된 사다리(p["orders"])를 그대로 넘긴다. 1차가로부터 다시
+        # 계산하면 사용자가 지정한 customized 사다리가 무시된다.
+        fills = orders.replay(p["orders"], filled, minutes, since=since_for(p))
+        if not fills:
+            continue
+
+        # 체결이 있는 기록만 그때그때 따로 쓴다. state/sha 를 매번 다시
+        # 읽는다 — 다른 워크플로(intake)가 그 사이에 썼을 수 있다.
+        try:
+            fresh, fresh_sha = gh.read_json(POSITIONS, default=models.empty_state())
+            out = models.apply_fills(models.normalize(fresh), p["id"], fills, day)
+            gh.write_json(POSITIONS, out, fresh_sha,
+                          f"자동체결: {p['name']} ({len(fills)}건)")
+        except models.AlreadyApplied:
+            continue
+        except Exception as e:
+            print(f"[경고] 자동체결 쓰기 실패 {p['id']}: {type(e).__name__}: {e}")
+            problems.append(p["id"])
+            continue
+        done += 1
+        print(f"  자동체결: {p['name']} — {', '.join(f['kind'] for f in fills)}")
+
+    if done:
+        print(f"자동 체결 {done}건")
+    return 1 if problems else 0

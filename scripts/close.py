@@ -60,7 +60,7 @@ from __future__ import annotations
 import sys
 
 from . import trading_calendar as cal
-from . import gh, models, naver, quotes
+from . import autofill, gh, models, naver, quotes
 
 WINDOW = 30                       # 최근 30거래일까지 메운다
 POSITIONS = "positions.json"
@@ -318,6 +318,20 @@ def main() -> int:
             # 그대로 다시 커밋한다.
             print(f"[경고] quotes.json 확정 갱신 실패: {type(e).__name__}: {e} — 다음 실행이 재시도한다")
             problems.append("quotes.json 확정 갱신 실패")
+
+    # 가상 지정가 주문 집행(설계 §4). 여기 두는 이유: 위에서 이미 보유
+    # 종목의 일봉을 60거래일치 받아뒀다 — 거름망이 공짜다. 별도 워크플로로
+    # 떼면 같은 일봉을 두 번 받게 되고, 두 실행 사이에 positions.json 이
+    # 바뀌어 어긋날 여지도 생긴다.
+    #
+    # fetch_failed 가 있으면 건너뛴다. 일봉을 못 받은 종목은 거름망을
+    # 통과시킬 근거 자체가 없어서, 그 종목의 체결을 조용히 놓친 채
+    # "오늘은 체결 없음"으로 끝나기 때문이다 — 백필을 건너뛰는 것과 같은 이유.
+    if fetch_failed:
+        print(f"[경고] 일봉 실패 {len(fetch_failed)}건 — 자동 체결을 건너뛴다(다음 실행이 재시도)")
+    elif autofill.run(bars, latest):
+        problems.append("자동 체결 쓰기 실패")
+
     print(f"완료 — 새 스냅샷 {made}건")
     return 1 if problems else 0
 

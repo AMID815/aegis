@@ -279,7 +279,14 @@ def test_main_정상_백필_후_확정_커밋(monkeypatch, capsys):
         assert sha is None  # 새 파일 — 이미 있는 날짜에 쓰면 422
         assert body["date"] in (ALL_DAYS[-2], ALL_DAYS[-1])
         assert "005930" in body["closes"]
-        assert body["positions"] == 정상_보유["positions"]
+        # 전체 dict 를 == 로 비교하지 않는다 — 스키마가 계속 자란다(Task 6 이
+        # orders/observed_at/auto 를 추가했듯, normalize() 가 채워 넣는 새
+        # 필드가 늘어나는 것 자체는 "포지션 내용이 그대로다"를 깨지 않는다).
+        # 픽스처에 있던 키만 값이 안 바뀌었는지 본다.
+        assert len(body["positions"]) == len(정상_보유["positions"])
+        for got, want in zip(body["positions"], 정상_보유["positions"]):
+            for key, val in want.items():
+                assert got[key] == val
         assert body["price_basis"] == "asof-fetch"   # F4: 조회 시점 기준임을 스냅샷에 남긴다
 
     확정_path, 확정_body, 확정_sha, 확정_msg = 쓴것[2]
@@ -733,3 +740,56 @@ def test_history_파일의_positions는_닫힌_포지션도_그대로_담는다(
         # closes 는 오늘 값이 필요한 열린 종목만 담는다(닫힌 999999 는
         # 조회조차 안 됐다 — 위 가짜_bars 의 AssertionError 로 이미 확인).
         assert "999999" not in body["closes"]
+
+
+# ---------------------------------------------------------------------------
+# Task 10 — autofill 배선. 기존 main() 통합 테스트와 같은 패턴(_기본_준비 →
+# close.main())을 그대로 쓴다 — 이 파일에는 "한 번에 다 해주는" 별도
+# 헬퍼가 없고, 모든 main() 테스트가 이 두 줄을 직접 반복하는 게 확립된
+# 관례다. write_json 은 항상 write_capture 로 잡아 실제 네트워크 쓰기가
+# 새어나가지 않게 한다(다른 테스트들과 동일).
+# ---------------------------------------------------------------------------
+
+def test_close_가_autofill_을_들고_있다():
+    """배선이 빠지면 자동 체결이 영영 안 돈다 — 조용한 고장이라 못박는다."""
+    assert hasattr(close, "autofill")
+    assert callable(close.autofill.run)
+
+
+def test_일봉_실패가_있으면_자동체결을_건너뛴다(monkeypatch):
+    """일봉을 못 받은 종목은 거름망을 통과시킬 근거 자체가 없다. 그 상태로
+    돌면 그 종목의 체결을 조용히 놓친 채 '오늘은 체결 없음'으로 끝난다 —
+    history 백필을 건너뛰는 것과 같은 이유다."""
+    called = []
+    쓴것 = []
+    _기본_준비(monkeypatch, write_capture=쓴것)
+    monkeypatch.setattr(close.autofill, "run",
+                        lambda bars, day: called.append(day) or 0)
+    monkeypatch.setattr(close.naver, "fetch_bars",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("네트워크")))
+    close.main()
+    assert called == [], "일봉이 실패했는데 자동 체결을 돌렸다"
+
+
+def test_일봉이_멀쩡하면_받아둔_봉을_그대로_넘긴다(monkeypatch):
+    """close.py 가 이미 손에 든 일봉을 재사용한다 — 거름망이 공짜인 이유."""
+    got = {}
+    쓴것 = []
+    _기본_준비(monkeypatch, write_capture=쓴것)
+    monkeypatch.setattr(close.autofill, "run",
+                        lambda bars, day: got.update(bars=bars, day=day) or 0)
+    close.main()
+    assert "bars" in got, "자동 체결이 호출되지 않았다"
+    assert isinstance(got["bars"], dict)
+    assert "005930" in got["bars"]
+    assert got["day"] == ALL_DAYS[-1]       # 확정 대상 거래일이 넘어간다
+
+
+def test_자동체결_쓰기_실패는_close_종료코드에_반영된다(monkeypatch):
+    """autofill.run 이 1을 돌려주면 그건 쓰기 실패다 — 조용히 삼키면
+    안 된다(close.py 의 problems 관례)."""
+    쓴것 = []
+    _기본_준비(monkeypatch, write_capture=쓴것)
+    monkeypatch.setattr(close.autofill, "run", lambda bars, day: 1)
+    rc = close.main()
+    assert rc == 1

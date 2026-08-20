@@ -58,6 +58,18 @@ UA = {"User-Agent": "Mozilla/5.0"}   # 아래 `_fetch` 가 요청 헤더로 쓴�
 POLL_URL = "https://polling.finance.naver.com/api/realtime/domestic/stock/{codes}"
 FCHART_URL = ("https://fchart.stock.naver.com/sise.nhn"
               "?symbol={symbol}&timeframe=day&count={n}&requestType=0")
+
+# 분봉. **fchart 가 아니라 api.stock.naver.com 이다** — 2026-08-20 실측:
+# fchart 의 timeframe=minute 은 시·고·저가가 전부 null 이고 종가만 온다
+# (2,667개 전수 확인). 지정가 체결 판정은 그 분 안의 고가·저가가 있어야
+# 가능하므로 OHLC 를 다 주는 이쪽을 쓴다. 응답은 **UTF-8 JSON** 이다
+# (fchart 의 EUC-KR XML 과 다르다 — 인코딩을 헷갈리면 즉시 터진다).
+#
+# 09:00~15:30(KRX 정규장)만 온다. startDateTime 을 08:00 으로 줘도
+# 381개만 왔다 — 시간외·NXT 구간은 이 엔드포인트에 없다(설계 §6).
+# 창은 약 7거래일이라 그보다 오래된 날짜는 빈 응답이 온다.
+MINUTE_URL = ("https://api.stock.naver.com/chart/domestic/item/{symbol}/minute"
+              "?startDateTime={start}&endDateTime={end}")
 SUM_URL = "https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
 ETF_URL = "https://finance.naver.com/api/sise/etfItemList.nhn"
 
@@ -108,6 +120,26 @@ def _num(s):
     잡지 않는 건 "이 함수 자체는 늘 엄격해야 한다"는 계약을 지키기 위해서다.
     """
     return int(str(s).replace(",", "").strip())
+
+
+def _numf(v):
+    """JSON 수치 필드 → int. `_num` 과 달리 **실수를 받는다.**
+
+    `_num` 은 콤마 낀 문자열("247,500")용이라 `int(str(v)...)` 로 되어 있어
+    `258500.0` 을 못 읽는다(`int("258500.0")` 은 ValueError). 그런데 분봉
+    엔드포인트는 가격을 **실수 JSON 으로** 준다(2026-08-20 실측:
+    `"highPrice":258500.0`). `_num` 을 그대로 쓰면 모든 행이 ValueError 로
+    걸러져 `EmptyParseError` 가 나고, **자동 체결이 영원히 안 도는데
+    아무 오류도 안 보이는** 상태가 된다.
+
+    `_num` 쪽을 고치지 않는 이유: 그건 HTML/XML 엔드포인트 전용이고
+    "늘 엄격해야 한다"는 계약이 docstring 에 명시돼 있다. 호출자가 다르면
+    변환도 다른 게 맞다.
+
+    원 단위 정수라 float→round 는 정확하다. 콤마도 흡수해둔다 — 이
+    엔드포인트는 안 쓰지만 공짜다.
+    """
+    return round(float(str(v).replace(",", "")))
 
 
 def _corrupted(names) -> bool:
@@ -207,6 +239,36 @@ def parse_fchart(body: str) -> dict:
     if not bars:
         raise EmptyParseError("일봉 0건")
     return bars
+
+
+def parse_minute(body: str) -> list:
+    """분봉 JSON → [{"t": "YYYYMMDDHHMM", "high": int, "low": int}, ...].
+
+    **시간 오름차순으로 정렬해서 돌려준다** — orders.replay 가 순서에
+    의존하는데, 응답 순서를 믿을 근거가 없다.
+
+    항목 하나가 망가져도(거래정지 종목의 `"-"` 자리표시자, 마크업 변경으로
+    dict 가 아닌 값) 나머지는 살린다 — parse_polling·parse_market_sum 이
+    이미 취하는 태도와 같다. 한 종목의 한 분 때문에 그날 체결 판정을
+    통째로 잃는 게 더 나쁘다.
+
+    0건이면 EmptyParseError 다. 빈 응답을 "오늘 거래 없음"으로 조용히
+    넘기면 실제로는 API 가 바뀐 건데 체결을 영원히 못 잡는다.
+    """
+    rows = json.loads(body)
+    out = []
+    for row in rows if isinstance(rows, list) else []:
+        try:
+            t = str(row["localDateTime"])[:12]     # 초 단위는 버린다
+            out.append({"t": t,
+                        "high": _numf(row["highPrice"]),
+                        "low": _numf(row["lowPrice"])})
+        except (KeyError, ValueError, TypeError, AttributeError):
+            continue
+    if not out:
+        raise EmptyParseError("분봉 결과 0건")
+    out.sort(key=lambda m: m["t"])
+    return out
 
 
 def trading_days(body: str) -> list:
@@ -386,6 +448,18 @@ def missing_codes(asked: list, got: dict) -> list:
 
 def fetch_bars(symbol: str, n: int = 60) -> dict:
     return parse_fchart(_fetch(FCHART_URL.format(symbol=symbol, n=n), EUCKR))
+
+
+def fetch_minute(symbol: str, day: str) -> list:
+    """하루치 분봉. `day` 는 "YYYY-MM-DD".
+
+    창이 약 7거래일이라 그보다 오래된 날짜는 빈 응답이 온다 —
+    EmptyParseError 로 나가고, 호출자(autofill)가 그 종목을 건너뛴다.
+    """
+    d = day.replace("-", "")
+    return parse_minute(_fetch(
+        MINUTE_URL.format(symbol=symbol, start=f"{d}000000", end=f"{d}235959"),
+        "utf-8"))
 
 
 def fetch_trading_days(n: int = 250) -> list:

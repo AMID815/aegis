@@ -23,6 +23,8 @@ Stage 1 리뷰(코드리뷰 C1/I1/I2/I3)에서 추가/수정된 테스트:
 - 쓰기 실패 테스트는 capsys 로 진단 메시지 출력까지 검증하도록 강화했다
   (기존 버전은 try/except 래퍼를 통째로 지워도 통과했다).
 """
+import copy
+
 import pytest
 
 from scripts import intake, models
@@ -797,3 +799,110 @@ def test_amend_후에도_최상위_부가_키는_살아있다(monkeypatch):
     assert intake.main() == 0
     assert captured["body"]["cash"] == 5000000
     assert captured["body"]["watchlist"] == ["035420"]
+
+
+# ---------------------------------------------------------------------------
+# 델타(watch-expiry 리뷰) — orders/auto/delete 는 id+was 로 기존 기록을
+# 겨눈다(buy/watch 와 달리 req 에 name/date 가 없다). main() 이 예전에는
+# req.get("name")/req.get("date") 로 메시지를 조립해 "orders: None (None)",
+# "auto: None (None)", "delete: None (None)" 을 냈다 — 아무것도 깨지진
+# 않지만 되돌릴 수 없는 파일(positions.json)의 감사 로그가 그 세 op 에서
+# 전부 읽을 수 없게 된다. amend 가 이미 푼 문제(대상을 찾아 이름/id 를
+# _single_line 으로 거른다)를 그대로 따른다.
+# ---------------------------------------------------------------------------
+
+기존_삼성_보유중 = {"schema": 1, "positions": [
+    {"id": "20260819-005930", "code": "005930", "name": "삼성전자",
+     "buys": [{"date": "2026-08-19", "price": 247500}],
+     "exits": [], "adjustments": [], "status": "open",
+     "source": "종가베팅", "memo": "눌림", "signal_date": "2026-08-18",
+     "orders": {}, "auto": True},
+]}
+
+
+def test_delete_커밋_메시지에_대상의_이름과_id가_들어간다(monkeypatch):
+    monkeypatch.setattr(intake.gh, "read_json",
+                        lambda *a, **k: (기존_삼성_보유중, "sha"))
+    captured = {}
+
+    def 가짜_쓰기(path, body, sha, message):
+        captured["message"] = message
+
+    monkeypatch.setattr(intake.gh, "write_json", 가짜_쓰기)
+    delete_body = ('```json\n{"op":"delete","id":"20260819-005930","was":"005930",'
+                   '"was_price":247500}\n```')
+    monkeypatch.setenv("ISSUE_BODY", delete_body)
+    assert intake.main() == 0
+    assert captured["message"] == "delete: 삼성전자 (20260819-005930)"
+
+
+def test_auto_커밋_메시지에_대상의_이름과_id가_들어간다(monkeypatch):
+    monkeypatch.setattr(intake.gh, "read_json",
+                        lambda *a, **k: (기존_삼성_보유중, "sha"))
+    captured = {}
+
+    def 가짜_쓰기(path, body, sha, message):
+        captured["message"] = message
+
+    monkeypatch.setattr(intake.gh, "write_json", 가짜_쓰기)
+    auto_body = ('```json\n{"op":"auto","id":"20260819-005930","was":"005930",'
+                 '"auto":false}\n```')
+    monkeypatch.setenv("ISSUE_BODY", auto_body)
+    assert intake.main() == 0
+    assert captured["message"] == "auto: 삼성전자 (20260819-005930)"
+
+
+def test_orders_커밋_메시지에_대상의_이름과_id가_들어간다(monkeypatch):
+    monkeypatch.setattr(intake.gh, "read_json",
+                        lambda *a, **k: (기존_삼성_보유중, "sha"))
+    captured = {}
+
+    def 가짜_쓰기(path, body, sha, message):
+        captured["message"] = message
+
+    monkeypatch.setattr(intake.gh, "write_json", 가짜_쓰기)
+    orders_body = ('```json\n{"op":"orders","id":"20260819-005930","was":"005930",'
+                   '"buy2":240000,"buy3":230000}\n```')
+    monkeypatch.setenv("ISSUE_BODY", orders_body)
+    assert intake.main() == 0
+    assert captured["message"] == "orders: 삼성전자 (20260819-005930)"
+
+
+# 코드리뷰 포인트 6과 같은 위험, 출처만 다르다 — 저장된 name 은 손편집이
+# 남긴 개행을 그대로 지니고 있을 수 있고, delete/auto/orders 는 그 name 을
+# req 가 아니라 기존 기록에서 가져온다는 점만 amend 와 다르다. 대상이
+# 지워지는 delete 도, 지워지지 않는 auto/orders 도 똑같이 오염된 채로
+# 커밋 메시지에 실리면 안 된다.
+def test_delete_auto_orders_커밋_메시지는_저장된_이름의_개행도_지운다(monkeypatch):
+    오염됨 = {"schema": 1, "positions": [
+        {"id": "20260819-005930", "code": "005930",
+         "name": "삼성전자\n악성 트레일러",       # 과거 손편집이 남긴 오염
+         "buys": [{"date": "2026-08-19", "price": 247500}],
+         "exits": [], "adjustments": [], "status": "open",
+         "source": "종가베팅", "memo": "눌림", "signal_date": None,
+         "orders": {}, "auto": True},
+    ]}
+    captured = {}
+
+    def 가짜_쓰기(path, body, sha, message):
+        captured["message"] = message
+
+    for body_str in (
+        '```json\n{"op":"delete","id":"20260819-005930","was":"005930",'
+        '"was_price":247500}\n```',
+        '```json\n{"op":"auto","id":"20260819-005930","was":"005930",'
+        '"auto":false}\n```',
+        '```json\n{"op":"orders","id":"20260819-005930","was":"005930",'
+        '"buy2":240000,"buy3":230000}\n```',
+    ):
+        # 매 반복마다 얕은 복사가 아니라 새로 만든다 — delete 가 앞
+        # 반복에서 리스트를 지워버리면 뒤 반복이 대상을 못 찾는다.
+        monkeypatch.setattr(
+            intake.gh, "read_json",
+            lambda *a, s=copy.deepcopy(오염됨), **k: (s, "sha"))
+        monkeypatch.setattr(intake.gh, "write_json", 가짜_쓰기)
+        monkeypatch.setenv("ISSUE_BODY", body_str)
+        captured.clear()
+        assert intake.main() == 0
+        assert "\n" not in captured["message"]
+        assert "삼성전자" in captured["message"]

@@ -195,6 +195,21 @@ def main() -> int:
         return 3
     prior_count = len(state["positions"])
     changed_id = []   # amend 전용 out-parameter — apply() 참조
+    op = req.get("op")
+
+    # orders/auto/delete 는 id+was 로 기존 기록 하나를 겨눈다(models._target)
+    # — buy/watch 와 달리 req 자체엔 name/date 가 없다(대상은 이미 존재하는
+    # 기록이지 이번에 적어 낸 값이 아니다). delete 는 반영되면 그 기록이
+    # out 에서 사라져 나중엔 못 찾으므로, 세 op 모두 반영 **전** 여기
+    # state(정규화까지 끝난 상태)에서 미리 떠 둔다 — orders/auto 는 반영
+    # 후에도 살아있지만 굳이 다른 시점을 쓰지 않고 통일한다. 이 값은 뒤에서
+    # 커밋 메시지를 만들 때 amend 와 똑같이 _single_line 을 거쳐서만 쓴다
+    # (기존 기록의 저장된 name 은 req 의 name 만큼이나 못 믿는다 — 손편집이
+    # 남긴 개행이 그대로 실려올 수 있다).
+    id_target = None
+    if op in ("orders", "auto", "delete"):
+        id_target = next(
+            (p for p in state["positions"] if p.get("id") == req.get("id")), None)
 
     try:
         out = apply(state, req, changed_id)
@@ -209,7 +224,6 @@ def main() -> int:
         print(f"거부: {e}")
         return 2
 
-    op = req.get("op")
     if op == "delete":
         # delete(이 함수의 "nothing else" 범위 밖으로 튀어나온 한 가지
         # 예외) 는 정확히 1건 줄어드는 게 **정상**이다 — apply_delete 가
@@ -265,6 +279,21 @@ def main() -> int:
         name = _single_line(changed["name"]) or changed["code"]
         pid = _single_line(changed["id"]) or changed["code"]
         message = f"amend: {name} ({pid})"
+        commit_target = pid
+    elif op in ("orders", "auto", "delete"):
+        # amend 와 같은 문제, 출처만 다르다 — id_target 은 위에서(반영
+        # 전에) 같은 state 에서 떠 뒀다. apply() 가 성공했다는 건
+        # models._target() 이 이 id 를 찾았다는 뜻이므로, id_target 이
+        # None 이면 그 자체가 이 코드(혹은 위 사전 캡처)의 버그다 —
+        # amend 의 changed-None 처리와 같은 논리로, 조용히 넘기지 않고
+        # 시끄럽게 죽는다.
+        if id_target is None:
+            raise RuntimeError(
+                f"{op} 반영됐다는데 대상 기록을 못 찾음(id={req.get('id')!r}) "
+                f"— 코드 버그")
+        name = _single_line(id_target["name"]) or id_target["code"]
+        pid = _single_line(id_target["id"]) or id_target["code"]
+        message = f"{op}: {name} ({pid})"
         commit_target = pid
     else:
         # code/date 는 이 시점에 이미 apply() 안의 _code()/_date() 를 통과했다

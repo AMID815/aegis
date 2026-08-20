@@ -12,6 +12,8 @@ import datetime
 import math
 import re
 
+from . import orders as _orders
+
 SCHEMA = 1
 # KRX 는 숫자 6자리만 쓰지 않는다 — 2026-08-19 실측(87페이지 전수): 삼성에피스
 # 홀딩스 0126Z0, SOL AI반도체TOP2플러스 0167A0 등 영숫자 코드가 4,299건 중
@@ -308,6 +310,18 @@ def apply_buy(state: dict, req: dict) -> dict:
         sig = _date(sig)
         if sig > date:
             raise RejectedError(f"시그널일이 매수일보다 늦음: signal={sig} buy={date}")
+    # 관측 시점에 2차·3차 지정가를 **절대가격으로 확정**한다(설계 §7).
+    # 비율로 매번 다시 계산하면, 나중에 1차가를 amend 로 고쳤을 때 이미
+    # 체결된 물타기의 근거 가격이 소급해서 바뀐다.
+    ladder = {**_orders.plan(price), "customized": False}
+    # 여기서 만든 것을 normalize 가 격리하면 최악이다 — 쓰기는 성공하는데
+    # 다음 읽기에서 그 기록이 사라져 손편집으로만 복구된다. 실측
+    # (2026-08-20): 1차가 12원 이하면 반올림 때문에 buy2 >= 1차가 이거나
+    # buy3 >= buy2 가 되어 _orders_sane 을 통과하지 못한다. 그런 종목은
+    # 문 앞에서 거부한다.
+    if not _orders_sane(ladder, [{"date": date, "price": price}]):
+        raise RejectedError(
+            f"1차가가 너무 낮아 지정가 사다리를 만들 수 없음: {price}원")
     state["positions"].append({
         "id": pid,
         "code": code,
@@ -318,6 +332,9 @@ def apply_buy(state: dict, req: dict) -> dict:
         "exits": [],
         "adjustments": [],
         "status": OPEN,
+        "orders": ladder,
+        "observed_at": _text(req.get("observed_at"), 20, default="") or None,
+        "auto": True,
         "memo": _text(req.get("memo"), 200, default=""),
     })
     return state
@@ -344,6 +361,71 @@ def apply_sell(state: dict, req: dict) -> dict:
     return state
 
 
+def _target(state: dict, req: dict):
+    """id + was 로 기록 하나를 지목한다 — apply_amend 와 같은 계약.
+
+    `was`(코드) 대조가 없으면 페이지가 낡은 목록을 들고 있을 때 엉뚱한
+    기록을 고칠 수 있다(apply_amend docstring 의 id 재사용 경로 참조).
+    """
+    pid = req.get("id")
+    match = next((p for p in state["positions"] if p["id"] == pid), None)
+    if match is None:
+        raise RejectedError(f"대상 없음: {pid!r}")
+    if match["code"] != req.get("was"):
+        raise RejectedError(
+            f"코드 불일치(was): 저장={match['code']!r} 요청={req.get('was')!r}")
+    return match
+
+
+def apply_orders(state: dict, req: dict) -> dict:
+    """2차·3차 지정가를 직접 지정한다. `customized: true` 가 남는다.
+
+    표시를 남기는 이유: 통계에서 "규칙대로 굴린 기록"과 "손본 기록"을
+    갈라 봐야 한다(설계 §7). 안 그러면 나중에 "이 스크리너가 난 건가 내가
+    손봐서 난 건가"를 구분할 수 없다.
+
+    검증은 `_orders_sane` 과 **같은 규칙**이어야 한다 — 여기서 통과시킨
+    값을 normalize 가 격리하면 저장은 되는데 못 읽는 기록이 생긴다.
+    """
+    state = normalize(state)
+    match = _target(state, req)
+    if not match["buys"]:
+        raise RejectedError(f"아직 매수 전이라 주문가를 못 잡음: {match['id']!r}")
+    first = match["buys"][0]["price"]
+    buy2 = _price(req.get("buy2"))
+    buy3 = _price(req.get("buy3"))
+    # 물타기는 아래로만 간다. 위로 잡으면 매수 즉시 체결되어 "물타기"가
+    # 아니라 그냥 같은 가격에 세 번 산 기록이 된다.
+    if buy2 >= first:
+        raise RejectedError(f"2차가가 1차가보다 높음: {buy2} >= {first}")
+    if buy3 >= buy2:
+        raise RejectedError(f"3차가가 2차가보다 높음: {buy3} >= {buy2}")
+    new = {"buy2": buy2, "buy3": buy3, "customized": True}
+    if match.get("orders") == new:
+        raise AlreadyApplied(match["id"])
+    match["orders"] = new
+    return state
+
+
+def apply_auto(state: dict, req: dict) -> dict:
+    """자동 예외 토글. `auto: false` 면 이 종목은 전부 수동이 된다.
+
+    자동매도뿐 아니라 자동매수(2차·3차)도 같이 멈춘다(설계 §8) — 손절은
+    거부하면서 물은 자동으로 타는 어중간한 상태를 만들지 않는다.
+    """
+    state = normalize(state)
+    match = _target(state, req)
+    v = req.get("auto")
+    if not isinstance(v, bool):
+        # 문자열 "false" 는 파이썬에서 참이다 — 조용히 통과시키면 사용자가
+        # 막았다고 믿는 종목이 자동 매매된다.
+        raise RejectedError(f"auto 가 불리언이 아님: {v!r}")
+    if match.get("auto", True) == v:
+        raise AlreadyApplied(match["id"])
+    match["auto"] = v
+    return state
+
+
 # amend 값 필드 화이트리스트(F1). 값 필드가 전부 선택(패치니까)이라, 오타난
 # 키는 검증할 대상 자체가 없어 조용히 무시되고 "아무것도 안 바뀜" →
 # AlreadyApplied(rc=4) 로 끝난다 — 가장 흔한 실수(buy:{...} 중첩을 깜빡하고
@@ -355,7 +437,7 @@ def apply_sell(state: dict, req: dict) -> dict:
 # 일관적이다.
 _AMEND_FIELDS = frozenset({
     "op", "id", "was", "was_price", "code", "name", "source", "memo",
-    "signal_date", "buy", "exit"})
+    "signal_date", "buy", "exit", "observed_at"})
 _AMEND_BUY_FIELDS = frozenset({"price", "date"})
 _AMEND_EXIT_FIELDS = frozenset({"price", "date", "reason"})
 
@@ -519,6 +601,8 @@ def apply_amend(state: dict, req: dict, changed_id: list | None = None) -> dict:
     if "signal_date" in req:
         sig = req.get("signal_date") or None
         new["signal_date"] = _date(sig) if sig else None
+    if "observed_at" in req:
+        new["observed_at"] = _text(req.get("observed_at"), 20, default="") or None
 
     buy_patch = req.get("buy")
     if buy_patch is not None:

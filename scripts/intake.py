@@ -95,6 +95,10 @@ def apply(state: dict, req: dict, changed_id: list | None = None) -> dict:
         return models.apply_sell(state, req)
     if op == "amend":
         return models.apply_amend(state, req, changed_id)
+    if op == "orders":
+        return models.apply_orders(state, req)
+    if op == "auto":
+        return models.apply_auto(state, req)
     raise models.RejectedError(f"모르는 op: {op!r}")
 
 

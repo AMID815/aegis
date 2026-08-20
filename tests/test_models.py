@@ -1167,3 +1167,115 @@ def test_추가매수가_여러_건이어도_전부_본다():
     assert st["positions"] == []
     assert len(dropped) == 1
     assert isinstance(dropped, list)
+
+
+# ── Task 11: orders / auto 연산 ────────────────────────────────────────────
+
+
+def test_매수하면_주문가가_자동으로_붙는다():
+    st = models.apply_buy(models.empty_state(), {
+        "op": "buy", "code": "005930", "date": "2026-08-20", "price": 100000})
+    p = st["positions"][0]
+    assert p["orders"] == {"buy2": 94000, "buy3": 88000, "customized": False}
+    assert p["auto"] is True
+
+
+def test_매수_직후의_기록은_normalize_를_그대로_통과한다():
+    """apply_buy 가 만든 것을 normalize 가 격리하면 최악이다 — 쓰기는
+    성공하는데 다음 읽기에서 사라져, 손편집으로만 복구된다."""
+    st = models.apply_buy(models.empty_state(), {
+        "op": "buy", "code": "005930", "date": "2026-08-20", "price": 100000})
+    dropped = []
+    assert len(models.normalize(st, dropped)["positions"]) == 1
+    assert dropped == []
+
+
+@pytest.mark.parametrize("price", [1, 5, 8, 9, 12])
+def test_사다리를_만들_수_없는_싼_종목은_매수를_거부한다(price):
+    """실측(2026-08-20): 1차가 12원 이하면 반올림 때문에 buy2 >= 1차가 이거나
+    buy3 >= buy2 가 되어 _orders_sane 을 통과하지 못한다. 그대로 두면
+    apply_buy 는 성공하는데 normalize 가 그 기록을 격리한다 — 쓰기는 됐는데
+    화면에서 사라지는, 가장 고약한 모양이다. 문 앞에서 거부한다."""
+    with pytest.raises(models.RejectedError):
+        models.apply_buy(models.empty_state(), {
+            "op": "buy", "code": "005930", "date": "2026-08-20", "price": price})
+
+
+@pytest.mark.parametrize("price", [13, 100, 247500])
+def test_사다리를_만들_수_있으면_매수를_받는다(price):
+    st = models.apply_buy(models.empty_state(), {
+        "op": "buy", "code": "005930", "date": "2026-08-20", "price": price})
+    assert len(st["positions"]) == 1
+
+
+def test_주문가를_직접_지정하면_customized_가_남는다():
+    st = models.apply_buy(models.empty_state(), {
+        "op": "buy", "code": "005930", "date": "2026-08-20", "price": 100000})
+    st = models.apply_orders(st, {"op": "orders", "id": "20260820-005930",
+                                  "was": "005930", "buy2": 95000, "buy3": 90000})
+    assert st["positions"][0]["orders"] == {
+        "buy2": 95000, "buy3": 90000, "customized": True}
+
+
+def test_주문가는_1차가보다_낮아야_한다():
+    st = models.apply_buy(models.empty_state(), {
+        "op": "buy", "code": "005930", "date": "2026-08-20", "price": 100000})
+    with pytest.raises(models.RejectedError):
+        models.apply_orders(st, {"op": "orders", "id": "20260820-005930",
+                                 "was": "005930", "buy2": 110000, "buy3": 90000})
+
+
+def test_3차가는_2차가보다_낮아야_한다():
+    st = models.apply_buy(models.empty_state(), {
+        "op": "buy", "code": "005930", "date": "2026-08-20", "price": 100000})
+    with pytest.raises(models.RejectedError):
+        models.apply_orders(st, {"op": "orders", "id": "20260820-005930",
+                                 "was": "005930", "buy2": 90000, "buy3": 95000})
+
+
+def test_지정한_주문가도_normalize_를_통과한다():
+    """apply_orders 가 통과시킨 값을 normalize 가 격리하면 안 된다 —
+    두 검증이 어긋나면 저장은 되는데 못 읽는 기록이 생긴다."""
+    st = models.apply_buy(models.empty_state(), {
+        "op": "buy", "code": "005930", "date": "2026-08-20", "price": 100000})
+    st = models.apply_orders(st, {"op": "orders", "id": "20260820-005930",
+                                  "was": "005930", "buy2": 95000, "buy3": 90000})
+    dropped = []
+    assert len(models.normalize(st, dropped)["positions"]) == 1
+    assert dropped == []
+
+
+def test_코드가_다르면_주문가를_못_바꾼다():
+    """was 대조 — apply_amend 와 같은 계약. 낡은 목록으로 엉뚱한 기록을
+    고치는 걸 막는다."""
+    st = models.apply_buy(models.empty_state(), {
+        "op": "buy", "code": "005930", "date": "2026-08-20", "price": 100000})
+    with pytest.raises(models.RejectedError):
+        models.apply_orders(st, {"op": "orders", "id": "20260820-005930",
+                                 "was": "000660", "buy2": 90000, "buy3": 85000})
+
+
+def test_예외_토글():
+    st = models.apply_buy(models.empty_state(), {
+        "op": "buy", "code": "005930", "date": "2026-08-20", "price": 100000})
+    st = models.apply_auto(st, {"op": "auto", "id": "20260820-005930",
+                                "was": "005930", "auto": False})
+    assert st["positions"][0]["auto"] is False
+
+
+def test_같은_값으로_토글하면_AlreadyApplied():
+    st = models.apply_buy(models.empty_state(), {
+        "op": "buy", "code": "005930", "date": "2026-08-20", "price": 100000})
+    with pytest.raises(models.AlreadyApplied):
+        models.apply_auto(st, {"op": "auto", "id": "20260820-005930",
+                               "was": "005930", "auto": True})
+
+
+def test_auto_가_불리언_아니면_토글을_거부한다():
+    """문자열 "false" 는 파이썬에서 참이다 — 조용히 통과시키면 사용자가
+    막았다고 믿는 종목이 자동 매매된다."""
+    st = models.apply_buy(models.empty_state(), {
+        "op": "buy", "code": "005930", "date": "2026-08-20", "price": 100000})
+    with pytest.raises(models.RejectedError):
+        models.apply_auto(st, {"op": "auto", "id": "20260820-005930",
+                               "was": "005930", "auto": "false"})

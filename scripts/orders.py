@@ -77,3 +77,52 @@ def stop_loss(prices: list) -> int | None:
     if len(prices) < 3:
         return None
     return round(average(prices) * STOP_LOSS_RATIO)
+
+
+def replay(first_price: int, filled: list, minutes: list, exempt: bool = False) -> list:
+    """분봉을 시간순으로 재생해 체결 목록을 돌려준다.
+
+    `minutes` 는 시간 오름차순이고, **관측 시각 이후만** 들어온다(자르는
+    건 autofill 몫). 저녁에 종가 보고 넣은 관측이 그날 오전 고가로
+    익절되면 승률이 부풀려지기 때문이다(설계 §5).
+
+    각 분봉에서 고가·저가만 본다 — 그 분 안에서 어디까지 갔는지가 체결
+    판정의 전부다. 분 안에서의 순서(고가가 먼저인지 저가가 먼저인지)는
+    알 수 없다. 매수는 저가로, 매도는 고가·저가로 판정하되 **매수를 먼저**
+    본다 — 갭하락으로 2차·3차가 같은 분에 체결되는 경우(설계 §4-1)를
+    실제 지정가 주문과 같게 처리하기 위함이다.
+
+    **각 주문은 자기 체결 이후의 분봉만 본다.** 이게 이 함수에서 가장
+    중요한 규칙이다(설계 §4-1). 3차가 체결되는 순간 익절선이 내려앉는데,
+    거기까지 떨어진 시점에 그 가격은 이미 지나온 값이다 — 분봉 전체를
+    한꺼번에 보면 **떨어지는 종목이 그 즉시 익절로 닫힌다.** 루프 안에서
+    순차 처리하는 지금 구조가 그 성질을 보장한다. 리팩터할 때 익절·손절
+    판정을 루프 밖으로 빼면 안 된다.
+
+    `exempt` 는 예외 버튼이다. 켜져 있으면 아무것도 체결하지 않는다 —
+    자동매도뿐 아니라 자동매수(2차·3차)도 같이 멈춘다(설계 §8).
+    """
+    if exempt:
+        return []
+    p = plan(first_price)
+    got = list(filled)
+    out = []
+    for m in minutes:
+        # 매수 먼저. 갭하락으로 2차·3차가 같은 분에 둘 다 체결될 수 있다 —
+        # 지정가 주문의 실제 동작이라 허용하되 순서를 보존한다(설계 §4-1).
+        if len(got) == 1 and m["low"] <= p["buy2"]:
+            got.append(p["buy2"])
+            out.append({"kind": "buy2", "t": m["t"], "price": p["buy2"]})
+        if len(got) == 2 and m["low"] <= p["buy3"]:
+            got.append(p["buy3"])
+            out.append({"kind": "buy3", "t": m["t"], "price": p["buy3"]})
+
+        tp = take_profit(got)
+        if m["high"] >= tp:
+            out.append({"kind": "take_profit", "t": m["t"], "price": tp})
+            break
+        sl = stop_loss(got)
+        if sl is not None and m["low"] <= sl:
+            out.append({"kind": "stop_loss", "t": m["t"], "price": sl})
+            break
+    return out

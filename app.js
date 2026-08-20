@@ -1616,7 +1616,7 @@ async function main() {
 // 과 WebCrypto SubtleCrypto.deriveBits({name:"PBKDF2",...}) 가 같은 값을
 // 내는지 이 작업에서 교차 검증했다 — 같은 문구·소금·반복수로 두 쪽
 // 모두 27c44761...449635 로 일치했다.)
-const GATE_PBKDF2_HEX = "REPLACE_WITH_YOUR_PBKDF2_HEX";
+const GATE_PBKDF2_HEX = "1ecc80828ee19c54a6cd9bb512ccf5cd64a2878ed3e7c9c5cd1b05518bf198af";
 
 // 공개 상수 — 비밀이 아니다(위 "왜 PBKDF2인가" 참조). 문구를 바꾸지 않는
 // 한 이 소금과 반복수는 그대로 둔다 — 바꾸면 같은 문구도 다른 해시가

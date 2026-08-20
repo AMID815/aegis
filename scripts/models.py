@@ -116,6 +116,34 @@ def _orders_sane(ords: dict, buys: list) -> bool:
     return True
 
 
+def _buy_sane(b) -> bool:
+    """매수 기록 하나가 쓸 수 있는 모양인가 — normalize 전용 검사.
+
+    `buys[0]`(손입력 관측)과 `buys[1:]`(자동 체결)을 **같은 기준**으로 본다.
+    예전에는 [0] 만 봤는데, [1:] 의 가격도 평균가 계산에 그대로 들어가고
+    거기서 익절선·손절선이 나온다 — 검증 수준이 다를 이유가 없다.
+
+    실측(2026-08-20): price 키가 없거나 dict 가 아니면 autofill.run 의
+    filled_prices() 가 KeyError/TypeError 로 터져 **그날 자동 체결 전체를
+    중단**시킨다(그 호출은 네트워크를 감싼 try/except 밖에 있다). 문자열·
+    소수·음수 가격은 조용히 평균가를 오염시킨다.
+
+    `_price` 를 그대로 쓰지 않고 결과를 대조하는 이유는 기존 buys[0] 검사와
+    같다 — `_price` 는 반올림해서 **고쳐** 돌려주는데, 저장된 값이 소수라는
+    것 자체가 손편집 흔적이므로 고치지 말고 격리해야 한다.
+    """
+    if not isinstance(b, dict):
+        return False
+    try:
+        _date(b.get("date"))
+        price_v = b.get("price")
+        if _price(price_v) != price_v:
+            return False
+    except RejectedError:
+        return False
+    return True
+
+
 def normalize(raw, dropped=None) -> dict:
     """읽어온 것을 믿지 않는다. 모양이 틀린 항목은 조용히 버리고 dropped 에 기록한다.
 
@@ -189,12 +217,11 @@ def normalize(raw, dropped=None) -> dict:
             if dropped is not None:
                 dropped.append(p)
             continue
-        try:
-            _date(buys[0].get("date"))
-            price_v = buys[0].get("price")
-            if _price(price_v) != price_v:   # 저장값은 반올림해도 그대로여야 한다 — 소수는 손으로 고친 흔적
-                raise RejectedError(f"저장된 가격이 정수가 아님: {price_v!r}")
-        except RejectedError:
+        # buys[0](손입력 관측)만 보면 buys[1:](자동 체결 — autofill.run 이
+        # 매일 덧붙이는 buy2/buy3 기록)이 새는 구멍이 된다. 그 가격도 같은
+        # 평균가 계산에 들어가 익절선·손절선을 낳으므로, 리스트 전체를
+        # 같은 기준(_buy_sane)으로 본다 — 자세한 이유는 _buy_sane 참조.
+        if not all(_buy_sane(b) for b in buys):
             if dropped is not None:
                 dropped.append(p)
             continue

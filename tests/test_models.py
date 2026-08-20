@@ -1110,3 +1110,60 @@ def test_buys가_없으면_1차가_대조는_건너뛴다():
     # 아직 도입 전) — 여기서 확인하는 건 orders 검증이 KeyError 를 내지
     # 않는다는 것뿐이다.
     assert isinstance(dropped, list)
+
+
+# ── Task 9: buys[1:](자동 체결)도 buys[0] 와 같은 기준으로 본다 ──────────
+
+
+def _buys(second, first_price=100000):
+    """buys[1] 만 바꿔가며 normalize 를 통과하는지 본다."""
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930",
+        "buys": [{"date": "2026-08-19", "price": first_price}, second],
+        "orders": {"buy2": 94000, "buy3": 88000}}]}, dropped)
+    return st["positions"], dropped
+
+
+@pytest.mark.parametrize("bad, why", [
+    ({"date": "2026-08-20", "kind": "buy2"},            "price 없음 — filled_prices 가 KeyError"),
+    ({"price": 94000, "kind": "buy2"},                  "date 없음"),
+    ("망가짐",                                            "dict 아님 — filled_prices 가 TypeError"),
+    ({"date": "2026-08-20", "price": "94000"},          "문자열 가격"),
+    ({"date": "2026-08-20", "price": 94000.5},          "소수 — buys[0] 였다면 거부됐을 값"),
+    ({"date": "2026-08-20", "price": -94000},           "음수"),
+    ({"date": "2026-08-20", "price": 0},                "0원"),
+    ({"date": "2026-08-20", "price": True},             "불리언 — 파이썬에서 int 로 통과한다"),
+    ({"date": "2026-13-99", "price": 94000},            "존재하지 않는 날짜"),
+])
+def test_손상된_추가매수는_격리한다(bad, why):
+    """buys[1:] 는 자동 체결 기록이고, 그 가격이 평균가 계산에 그대로 들어간다.
+    buys[0] 와 같은 수준으로 본다 — 실측(2026-08-20): 두 경우는 그날 자동
+    체결 전체를 중단시키고, 나머지는 오염된 값이 조용히 평균가에 섞인다."""
+    good, dropped = _buys(bad)
+    assert good == [], f"통과하면 안 된다({why}): {bad}"
+    assert len(dropped) == 1
+
+
+@pytest.mark.parametrize("ok", [
+    {"date": "2026-08-20", "price": 94000},
+    {"date": "2026-08-20", "price": 94000, "kind": "buy2",
+     "t": "202608200931", "auto": True},
+])
+def test_멀쩡한_추가매수는_통과한다(ok):
+    good, dropped = _buys(ok)
+    assert len(good) == 1 and dropped == []
+
+
+def test_추가매수가_여러_건이어도_전부_본다():
+    """3차까지 간 기록 — 마지막 것만 손상돼도 잡아야 한다."""
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930",
+        "buys": [{"date": "2026-08-19", "price": 100000},
+                 {"date": "2026-08-20", "price": 94000},
+                 {"date": "2026-08-21", "price": "88000"}],   # 마지막이 문자열
+        "orders": {"buy2": 94000, "buy3": 88000}}]}, dropped)
+    assert st["positions"] == []
+    assert len(dropped) == 1
+    assert isinstance(dropped, list)

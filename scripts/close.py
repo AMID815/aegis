@@ -329,7 +329,12 @@ def main() -> int:
     # "오늘은 체결 없음"으로 끝나기 때문이다 — 백필을 건너뛰는 것과 같은 이유.
     if fetch_failed:
         print(f"[경고] 일봉 실패 {len(fetch_failed)}건 — 자동 체결을 건너뛴다(다음 실행이 재시도)")
-    elif autofill.run(bars, latest):
+    # days — 위에서 이미 받아둔 거래일 달력(cal.too_short 로 길이까지
+    # 확인했다) 그대로 넘긴다. 지정가 관찰의 기한(watch.days)이 거래일로
+    # 셀 것을 요구해서(달력일로 세면 연휴마다 거짓 만료가 난다) autofill.run
+    # 도 이 달력이 필요하다 — 여기서 새로 받지 않고 재사용한다(일봉을
+    # 재사용하는 것과 같은 이유, 이 함수 위쪽 주석 참조).
+    elif autofill.run(bars, latest, days):
         problems.append("자동 체결 쓰기 실패")
 
     print(f"완료 — 새 스냅샷 {made}건")

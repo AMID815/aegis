@@ -80,3 +80,47 @@ def test_빈_달력():
     assert cal.recent([], 5) == []
     assert cal.missing([], 30, {"2026-08-19"}) == []
     assert cal.too_short([], need=30) is True
+
+
+# ── watch_deadline: 지정가 관찰의 만료일 ──────────────────────────────────
+# 2026-08-20(목), 21(금), 22-23 은 주말이라 달력에 없다, 24(월), 25(화).
+WATCH_DAYS = ["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25", "2026-08-26"]
+
+
+def test_사흘_기한은_등록일_다음날부터_센다():
+    """등록일(목) 당일은 세지 않는다 — 마감 후 등록이라 이미 지난 하루다.
+    금·월·화가 유효(주말은 거래일이 아니라 자동으로 건너뛴다) → 화요일이 마감일.
+    """
+    assert cal.watch_deadline(WATCH_DAYS, "2026-08-20", 3) == "2026-08-25"
+
+
+def test_주말을_건너뛴다():
+    """days=3 은 달력일로 금·토·일(=금요일 하루만 거래일)이 아니라
+    거래일로 금·월·화다 — 이 구분이 이 함수가 존재하는 이유 그 자체다."""
+    deadline = cal.watch_deadline(WATCH_DAYS, "2026-08-20", 3)
+    assert deadline != "2026-08-22"   # 토요일 — 애초에 달력에 없다
+    assert deadline == "2026-08-25"
+
+
+def test_하루_기한():
+    assert cal.watch_deadline(WATCH_DAYS, "2026-08-20", 1) == "2026-08-21"
+
+
+def test_등록일이_달력_밖이면_None():
+    """만료를 판단할 근거가 없다 — 클램프하지 않는다(held_days 와 같은 태도)."""
+    assert cal.watch_deadline(WATCH_DAYS, "2026-01-02", 3) is None
+
+
+def test_등록일_뒤로_n거래일이_아직_안_쌓였으면_None():
+    """마지막 날짜(08-26)에서 3거래일을 요구하면 달력이 그만큼 안 쌓였다 —
+    아직 만료를 판단할 수 없다는 뜻이지, 만료됐다는 뜻이 아니다."""
+    assert cal.watch_deadline(WATCH_DAYS, "2026-08-26", 3) is None
+    assert cal.watch_deadline(WATCH_DAYS, "2026-08-25", 2) is None  # 딱 하나 부족(idx 3+2=5, len=5)
+
+
+def test_마지막_날짜에_등록해도_n이_0을_넘으면_None():
+    assert cal.watch_deadline(WATCH_DAYS, "2026-08-26", 1) is None
+
+
+def test_빈_달력에서는_None():
+    assert cal.watch_deadline([], "2026-08-20", 3) is None

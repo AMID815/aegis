@@ -161,7 +161,7 @@ def test_체결되면_positions에_쓴다(monkeypatch):
                         lambda code, day: [{"t": "202608200931",
                                             "high": 106000, "low": 99000}])
     rc = autofill.run({"005930": {"20260820": {"high": 106000, "low": 99000}}},
-                      "2026-08-20")
+                      "2026-08-20", [])
     assert rc == 0
     assert len(fake.writes) == 1
     p = fake.writes[0][1]["positions"][0]
@@ -177,7 +177,7 @@ def test_안_닿으면_분봉을_요청하지도_쓰지도_않는다(monkeypatch
     monkeypatch.setattr(autofill.naver, "fetch_minute",
                         lambda code, day: calls.append(code) or [])
     rc = autofill.run({"005930": {"20260820": {"high": 101000, "low": 99000}}},
-                      "2026-08-20")
+                      "2026-08-20", [])
     assert rc == 0
     assert calls == []
     assert fake.writes == []
@@ -203,7 +203,7 @@ def test_이미_그날_체결된_구간은_다시_재생하지_않는다(monkeyp
         {"t": "202608191530", "high":  95000, "low":  94000},
     ])
     rc = autofill.run({"005930": {"20260819": {"high": 103000, "low": 94000}}},
-                      "2026-08-19")
+                      "2026-08-19", [])
     assert rc == 0
     assert fake.writes == [], f"소급 체결이 났다: {fake.writes}"
 
@@ -220,7 +220,7 @@ def test_분봉_조회_실패는_그_종목만_건너뛴다(monkeypatch):
     monkeypatch.setattr(autofill, "gh", fake)
     monkeypatch.setattr(autofill.naver, "fetch_minute", boom)
     rc = autofill.run({"005930": {"20260820": {"high": 106000, "low": 99000}}},
-                      "2026-08-20")
+                      "2026-08-20", [])
     assert fake.writes == []
     assert rc == 0
 
@@ -233,7 +233,7 @@ def test_쓰기_실패는_종료코드에_반영된다(monkeypatch):
                         lambda code, day: [{"t": "202608200931",
                                             "high": 106000, "low": 99000}])
     rc = autofill.run({"005930": {"20260820": {"high": 106000, "low": 99000}}},
-                      "2026-08-20")
+                      "2026-08-20", [])
     assert rc == 1
 
 
@@ -241,7 +241,7 @@ def test_손상된_파일에는_아무것도_쓰지_않는다(monkeypatch):
     """positions.json 은 다시 만들 수 없다 — intake·close 와 같은 태도."""
     fake = FakeGH({"schema": 1, "positions": [{"code": "망가짐"}]})
     monkeypatch.setattr(autofill, "gh", fake)
-    rc = autofill.run({}, "2026-08-20")
+    rc = autofill.run({}, "2026-08-20", [])
     assert fake.writes == []
     assert rc == 0
 
@@ -255,7 +255,7 @@ def test_저장된_사다리를_쓴다(monkeypatch):
                         lambda code, day: [{"t": "202608200931",
                                             "high": 99000, "low": 94000}])
     rc = autofill.run({"005930": {"20260820": {"high": 99000, "low": 94000}}},
-                      "2026-08-20")
+                      "2026-08-20", [])
     assert rc == 0
     p = fake.writes[0][1]["positions"][0]
     assert p["buys"][1]["price"] == 95000   # 기본값 94,000 이 아니다
@@ -268,10 +268,15 @@ def _pending(**over):
     p = {"id": "20260820-005930", "code": "005930", "name": "삼성전자",
          "buys": [], "exits": [], "adjustments": [], "status": "pending",
          "source": "종가베팅", "memo": "", "signal_date": None,
-         "watch": {"price": 240000, "date": "2026-08-20"},
+         "watch": {"price": 240000, "date": "2026-08-20", "days": 3},
          "orders": {}, "auto": True, "observed_at": None}
     p.update(over)
     return p
+
+
+# watch.date="2026-08-20"(목), days=3 → 유효일 금(21)·월(24)·화(25), 마감일 25일.
+# 22-23 은 주말이라 달력에 없다(거래일로 세라는 규약을 그대로 반영).
+CAL = ["2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25", "2026-08-26"]
 
 
 def test_지정가에_닿으면_체결하고_같은_실행에서_사다리까지_이어간다(monkeypatch):
@@ -285,7 +290,7 @@ def test_지정가에_닿으면_체결하고_같은_실행에서_사다리까지
         {"t": "202608211000", "high": 242000, "low": 240000},
     ])
     rc = autofill.run({"005930": {"20260821": {"high": 245000, "low": 239000}}},
-                      "2026-08-21")
+                      "2026-08-21", CAL)
     assert rc == 0
     p = fake.state["positions"][0]
     assert p["status"] == "open"
@@ -301,7 +306,7 @@ def test_지정가에_안_닿으면_pending_그대로다(monkeypatch):
     monkeypatch.setattr(autofill.naver, "fetch_minute",
                         lambda code, day: calls.append(code) or [])
     rc = autofill.run({"005930": {"20260821": {"high": 250000, "low": 245000}}},
-                      "2026-08-21")
+                      "2026-08-21", CAL)
     assert rc == 0
     assert calls == [], "일봉 저가가 목표가 위인데 분봉을 받았다"
     assert fake.writes == []
@@ -314,6 +319,111 @@ def test_예외_지정된_pending_은_체결되지_않는다(monkeypatch):
     monkeypatch.setattr(autofill.naver, "fetch_minute", lambda code, day: [
         {"t": "202608210931", "high": 241000, "low": 239000}])
     rc = autofill.run({"005930": {"20260821": {"high": 245000, "low": 239000}}},
-                      "2026-08-21")
+                      "2026-08-21", CAL)
     assert rc == 0
     assert fake.writes == []
+
+
+# ── 지정가 관찰의 기한(watch.days) ────────────────────────────────────────
+# "며칠 이내에 N원에 닿으면 자동 매수" — "며칠 이내에"를 채운다. 대기
+# 주문이 영원히 살아있으면, 다음날 닿은 신호와 반년 뒤 닿은 신호가 같은
+# "성공"으로 기록되어 스크리너 비교가 오염된다.
+
+
+def test_마감일_당일에_닿으면_체결하고_만료하지_않는다(monkeypatch):
+    """마감일(=CAL 에서 2026-08-25)은 아직 유효한 하루다 — 가격이 먼저다."""
+    fake = FakeGH({"schema": 1, "positions": [_pending()]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute", lambda code, day: [
+        {"t": "202608250931", "high": 241000, "low": 239000},   # 240,000 터치
+    ])
+    rc = autofill.run({"005930": {"20260825": {"high": 245000, "low": 239000}}},
+                      "2026-08-25", CAL)
+    assert rc == 0
+    p = fake.state["positions"][0]
+    assert p["status"] == "open", "마감일 당일 체결인데 만료로 처리됐다"
+    assert p["buys"][0]["price"] == 240000
+
+
+def test_마감일을_하루_넘기면_만료된다(monkeypatch):
+    """가격이 안 닿았고, 오늘(2026-08-26)이 마감일(2026-08-25)을 지났다."""
+    calls = []
+    fake = FakeGH({"schema": 1, "positions": [_pending()]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute",
+                        lambda code, day: calls.append(code) or [])
+    rc = autofill.run({"005930": {"20260826": {"high": 250000, "low": 245000}}},
+                      "2026-08-26", CAL)
+    assert rc == 0
+    assert calls == [], "만료 대상인데 분봉을 요청했다 — 가격을 볼 필요가 없다"
+    assert len(fake.writes) == 1
+    p = fake.state["positions"][0]
+    assert p["status"] == "expired"
+    assert p["watch"]["expired_on"] == "2026-08-26"
+    assert p["buys"] == []
+
+
+def test_마감일이_지나면_그날_가격이_닿아도_만료한다(monkeypatch):
+    """기한을 넘긴 뒤에는 그날 우연히 닿아도 체결이 아니다 — "그 기간 안에
+    온 신호"가 아니기 때문이다(지시문 결정 3). 만료 판정이 가격 판정보다
+    우선해야 한다(마감일 당일은 반대 — 위 테스트와 대칭)."""
+    fake = FakeGH({"schema": 1, "positions": [_pending()]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    calls = []
+    monkeypatch.setattr(autofill.naver, "fetch_minute",
+                        lambda code, day: calls.append(code) or [])
+    rc = autofill.run({"005930": {"20260826": {"high": 245000, "low": 239000}}},
+                      "2026-08-26", CAL)   # 저가 239,000 — 240,000 에 닿았다
+    assert rc == 0
+    assert calls == [], "만료가 가격 확인보다 먼저 결정돼야 한다"
+    p = fake.state["positions"][0]
+    assert p["status"] == "expired", "닿았지만 이미 기한을 넘겨 만료여야 한다"
+
+
+def test_달력이_등록일을_모르면_만료시키지_않는다(monkeypatch):
+    """watch.date 가 달력 밖 — 만료를 판단할 근거가 없다. 클램프하지
+    않는다(watch_deadline docstring)."""
+    fake = FakeGH({"schema": 1, "positions": [_pending()]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    rc = autofill.run({"005930": {"20260930": {"high": 250000, "low": 245000}}},
+                      "2026-09-30", [])   # 빈 달력
+    assert rc == 0
+    assert fake.writes == []
+    assert fake.state["positions"][0]["status"] == "pending"
+
+
+def test_달력이_짧으면_만료시키지_않는다(monkeypatch):
+    """등록일은 달력에 있지만 그 뒤로 n거래일이 아직 안 쌓였다."""
+    fake = FakeGH({"schema": 1, "positions": [_pending()]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    rc = autofill.run({"005930": {"20260821": {"high": 250000, "low": 245000}}},
+                      "2026-08-21", ["2026-08-20", "2026-08-21"])   # 3거래일 부족
+    assert rc == 0
+    assert fake.writes == []
+    assert fake.state["positions"][0]["status"] == "pending"
+
+
+def test_이미_만료된_기록은_나중에_닿아도_다시_체결되지_않는다(monkeypatch):
+    expired = _pending(status="expired",
+                       watch={"price": 240000, "date": "2026-08-20", "days": 3,
+                              "expired_on": "2026-08-26"})
+    fake = FakeGH({"schema": 1, "positions": [expired]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    called = []
+    monkeypatch.setattr(autofill.naver, "fetch_minute",
+                        lambda code, day: called.append(code) or [
+                            {"t": "202608270931", "high": 241000, "low": 239000}])
+    rc = autofill.run({"005930": {"20260827": {"high": 245000, "low": 239000}}},
+                      "2026-08-27", CAL)
+    assert rc == 0
+    assert called == [], "이미 만료된 기록인데 분봉을 요청했다"
+    assert fake.writes == []
+
+
+def test_만료_쓰기_실패는_종료코드에_반영된다(monkeypatch):
+    fake = FakeGH({"schema": 1, "positions": [_pending()]})
+    fake.fail_write = True
+    monkeypatch.setattr(autofill, "gh", fake)
+    rc = autofill.run({"005930": {"20260826": {"high": 250000, "low": 245000}}},
+                      "2026-08-26", CAL)
+    assert rc == 1

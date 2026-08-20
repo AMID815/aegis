@@ -135,6 +135,24 @@
 // 이름 완전일치 폴백(실측 데이터 중복 이름 0건), renderSummary 의
 // 승률/평균수익률 대 평균보유 분모 차이(의도된 동작 — 계산 가능 조건
 // 자체가 다르다).
+//
+// 4라운드(지정가 관찰의 기한, feat/watch-expiry) 반영:
+//
+// 19. "며칠 이내에 N원에 닿으면 자동 매수" — "며칠 이내에"가 빠져 있었다
+//     (scripts/models.py `watch.days`, autofill.py 가 거래일 달력으로
+//     판정). #watch-days 입력을 #watch-field 옆에 추가하고, 기존
+//     setWatchFieldVisible() 하나에 같이 실어(applyMode() 의 네 갈래를
+//     따로 안 고쳐도 "모든 모드가 이 요소도 설정한다"가 그대로 유지된다)
+//     hidden·required 를 함께 켜고 끈다. rows() 는 새 status(expired)를
+//     pending 과 대칭인 별도 갈래로 다룬다 — buys 가 계속 비어 있고
+//     (isReadablePosition 기준으로는 "손상"으로 잘못 뜬다), closed 는
+//     false 지만(매도도 실현손익도 없다) renderSummary 의 미결 집계에서는
+//     expired 플래그로 직접 빼야 한다(closed 하나만으로는 안 빠진다 —
+//     mismatch/needsAdjustReview 와 같은 이유). nameCell 은 pending 과
+//     같은 이유로 고치기·자동전환 버튼을 안 단다. 남은 관찰 기간
+//     (remainingWatchDays)은 화면 표시 전용이다 — 실제 만료 판정은 항상
+//     서버(autofill.run)가 하고, 이 값을 못 구해도(달력 범위 밖 등)
+//     조용히 "-"로 물러날 뿐 아무것도 막지 않는다.
 
 const RAW = "https://raw.githubusercontent.com/AMID815/mouigosa/data/";
 const REPO = "https://github.com/AMID815/mouigosa";
@@ -259,6 +277,29 @@ function heldDays(dayIndex, from, to) {
   return j - i;
 }
 
+// 대기(pending) 행에 남은 거래일 — scripts/trading_calendar.watch_deadline
+// 의 JS 판박이다(파이썬 쪽이 정답, 이건 표시 전용이라 못 구하면 조용히
+// null 로 물러난다 — autofill 이 실제로 만료시키는 판단은 항상 서버 쪽
+// 값을 쓴다, 이 값은 화면 참고용일 뿐이다). watch.days 가 없는 옛 기록
+// (이 기능 이전에 등록된 관찰)은 서버 기본값 5 를 그대로 가정한다 —
+// models.WATCH_DAYS_DEFAULT 와 맞춘다(2026-08-21: 사용자가 3에서 5로
+// 조정 — models.py 쪽 상수 하나만 바뀌면 여기도 같이 바꿔야 한다).
+//
+// "last"(가장 최근 확정 거래일) 기준으로 센다 — heldDays 가 이미 "오늘까지
+// 보유일수"를 last 기준으로 재는 것과 같은 이유(rows() 참조): 장중에는
+// trading_days 의 마지막 값이 아직 "어제"일 수 있지만, 그 시차를 이 값
+// 하나만 다르게 계산할 이유가 없다.
+function remainingWatchDays(dayIndex, days, last, watch) {
+  if (!watch || typeof watch.date !== "string" || last === null) return null;
+  const watchIdx = dayIndex.get(watch.date);
+  if (watchIdx === undefined) return null;   // 등록일이 달력 밖 — 클램프하지 않는다
+  const n = typeof watch.days === "number" ? watch.days : 5;
+  const deadlineIdx = watchIdx + n;
+  if (deadlineIdx >= days.length) return null;   // 달력이 아직 마감일까지 안 쌓였다
+  const lastIdx = dayIndex.get(last);
+  return deadlineIdx - lastIdx;
+}
+
 // buys[0].price 를 안전하게 읽을 수 있는가 — rows() 의 "읽을 수 없음" 판정과
 // findOpenPosition() 의 매도 대상 판정이 이 기준을 공유한다(통합 테스트로
 // 발견: 손편집으로 status="open" 인데 buys=[] 인 손상 레코드가 있으면,
@@ -299,8 +340,25 @@ function rows(state, quotes) {
     // 안 됐다) 지정가를 "매입가" 칸에 목표로 보여주고 나머지는 비운다.
     if (p.status === "pending") {
       const watchPrice = p.watch && typeof p.watch.price === "number" ? p.watch.price : null;
-      return { p, pending: true, bad: false, buy: watchPrice, now: null, ret: null,
-               held: null, closed: false, mismatch: false, needsAdjustReview: false,
+      return { p, pending: true, expired: false, bad: false, buy: watchPrice, now: null, ret: null,
+               held: null, remainingDays: remainingWatchDays(dayIndex, days, last, p.watch),
+               closed: false, mismatch: false, needsAdjustReview: false,
+               halted: false, buyDate: null, sellDate: null, orders, auto };
+    }
+
+    // 지정가 관찰이 기한(watch.days 거래일) 안에 목표가에 안 닿아 끝난
+    // 기록 — "이 스크리너의 신호가 안 왔다"는 그 자체로 결과이지 이기고
+    // 지는 게 아니다(지시문 결정 4). buys 는 pending 과 마찬가지로 계속
+    // 비어 있다 — closed 는 false 로 둔다(매도도, 실현 손익도 없다 —
+    // "종결"이 아니다). renderSummary 가 승률·평균수익률·미결 어디에도
+    // 이 행을 안 넣도록 expired 플래그로 직접 걸러낸다(closed 만으로는
+    // 미결 판정에서 안 빠진다 — mismatch/needsAdjustReview 처럼 별도
+    // 플래그가 필요한 이유가 같다).
+    if (p.status === "expired") {
+      const watchPrice = p.watch && typeof p.watch.price === "number" ? p.watch.price : null;
+      return { p, pending: false, expired: true, bad: false, buy: watchPrice, now: null, ret: null,
+               held: null, remainingDays: null,
+               closed: false, mismatch: false, needsAdjustReview: false,
                halted: false, buyDate: null, sellDate: null, orders, auto };
     }
 
@@ -308,8 +366,8 @@ function rows(state, quotes) {
     // normalize 가 없다. 화면에서 조용히 사라지면 안 되므로, 던지지 말고
     // '읽을 수 없음' 으로 표시한다.
     if (!isReadablePosition(p)) {
-      return { p, bad: true, pending: false, buy: null, now: null, ret: null, held: null,
-               closed: p.status === "closed", mismatch: false,
+      return { p, bad: true, pending: false, expired: false, buy: null, now: null, ret: null, held: null,
+               remainingDays: null, closed: p.status === "closed", mismatch: false,
                needsAdjustReview: false, halted: false,
                buyDate: null, sellDate: null, orders, auto };
     }
@@ -342,8 +400,8 @@ function rows(state, quotes) {
     if (needsAdjustReview) {
       const until = hasExit ? p.exits[p.exits.length - 1].date : (closed ? null : last);
       return {
-        p, pending: false, buy: null, now: null, ret: null,
-        held: heldDays(dayIndex, p.buys[0].date, until),
+        p, pending: false, expired: false, buy: null, now: null, ret: null,
+        held: heldDays(dayIndex, p.buys[0].date, until), remainingDays: null,
         closed, mismatch, needsAdjustReview, halted: false,
         buyDate: p.buys[0].date, sellDate: hasExit ? until : null,
         orders, auto,
@@ -361,9 +419,9 @@ function rows(state, quotes) {
     const until = sold !== null ? p.exits[p.exits.length - 1].date
                 : (closed ? null : last);
     return {
-      p, pending: false, buy, now,
+      p, pending: false, expired: false, buy, now,
       ret: now === null ? null : pct(buy, now),
-      held: heldDays(dayIndex, p.buys[0].date, until),
+      held: heldDays(dayIndex, p.buys[0].date, until), remainingDays: null,
       closed, mismatch, needsAdjustReview,
       halted: !!(q && q.status !== "tradable"),
       buyDate: p.buys[0].date,
@@ -386,11 +444,13 @@ function cell(tr, text, cls) {
 // createElement + textContent 로만 넣는다(innerHTML 금지, 종목명이 DOM에
 // 닿는 가장 위험한 지점).
 //
-// 버튼은 r.bad(읽을 수 없는 기록)이거나 id 가 없는 기록에는 안 붙인다 —
-// bad 기록은 어차피 이 파일 전체가 intake.py 의 최상위 손상 가드에
-// 걸려 어떤 op 도 반영될 수 없다(정상 기록까지 포함해서). "고치기"를
-// 눌러 이슈를 열어도 절대 반영될 수 없는 버튼을 보여주는 것보다,
-// 아예 안 보여주는 쪽이 정직하다.
+// 고치기/자동·수동 토글은 r.bad(읽을 수 없는 기록)이거나 id 가 없는
+// 기록에는 안 붙인다 — "고치기"는 amend 가 읽어야 할 매입가 자체를 못
+// 읽는 기록에서는 뜻이 없고, 자동/수동 토글도 물타기·익절·손절 판정이
+// 살아있는 정상 기록을 전제한다. 삭제는 다르다 — id 하나만 있으면
+// bad/pending/expired 를 가리지 않고 붙인다(nameCell 아래 삭제 블록의
+// 주석 참조). 망가지거나 끝난 기록을 지우는 게 바로 그런 행에서 가장
+// 필요하기 때문이다.
 function nameCell(tr, r, mark) {
   // <td> 자체는 손대지 않는다 — 일반 table-cell 로 남겨 다른 열과 같은
   // 폭 협상 규칙을 그대로 따르게 하고, flex 는 안에 넣는 별도 div 에만
@@ -403,13 +463,14 @@ function nameCell(tr, r, mark) {
   span.textContent = (r.p.name || r.p.code || "?") + mark;
   wrap.appendChild(span);
   if (!r.bad && typeof r.p.id === "string" && r.p.id) {
-    // 대기(pending) 기록에는 고치기를 달지 않는다. 달면 startAmend 가
-    // isReadablePosition(buys 가 비어 있어 false)에서 막으면서 "이 기록은
-    // 형식이 올바르지 않아 고칠 수 없습니다" 라고 말하는데, 그건 거짓이다
-    // — 손상된 게 아니라 아직 안 산 것뿐이다. 사용자가 파일이 깨졌다고
-    // 믿고 손편집하러 가게 만드는, amend 가 없애려던 바로 그 루프다.
+    // 대기(pending)·만료(expired) 기록에는 고치기를 달지 않는다. 달면
+    // startAmend 가 isReadablePosition(buys 가 비어 있어 false)에서
+    // 막으면서 "이 기록은 형식이 올바르지 않아 고칠 수 없습니다" 라고
+    // 말하는데, 그건 거짓이다 — 손상된 게 아니라 아직 안 샀거나(pending)
+    // 끝내 안 샀을 뿐이다(expired). 사용자가 파일이 깨졌다고 믿고
+    // 손편집하러 가게 만드는, amend 가 없애려던 바로 그 루프다.
     // (지정가 자체를 고치는 건 아직 연산이 없다 — 지우고 다시 넣는다.)
-    if (!r.pending) {
+    if (!r.pending && !r.expired) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "amend-btn";
@@ -419,11 +480,11 @@ function nameCell(tr, r, mark) {
     wrap.appendChild(btn);
     }
 
-    // 자동/수동 토글 — 종결된 기록(closed)은 더 이상 물타기·익절·손절의
-    // 대상이 아니므로(전부 이미 끝났다) 보여줄 이유가 없다. 열려 있거나
-    // (open) 아직 체결 전(pending)인 기록에만 단다 — 이 두 상태만 앞으로
-    // 자동 매매가 실제로 일어날 수 있다.
-    if (!r.closed) {
+    // 자동/수동 토글 — 종결된 기록(closed)이나 만료된 기록(expired)은 더
+    // 이상 물타기·익절·손절의 대상이 아니므로(전부 이미 끝났다) 보여줄
+    // 이유가 없다. 열려 있거나(open) 아직 체결 전(pending)인 기록에만
+    // 단다 — 이 두 상태만 앞으로 자동 매매가 실제로 일어날 수 있다.
+    if (!r.closed && !r.expired) {
       const toggleBtn = document.createElement("button");
       toggleBtn.type = "button";
       toggleBtn.className = "auto-toggle-btn";
@@ -436,6 +497,25 @@ function nameCell(tr, r, mark) {
         + (r.p.name || r.p.code || "?"));
       wrap.appendChild(toggleBtn);
     }
+  }
+
+  // 삭제 — 위 고치기/토글과 달리 !r.bad 게이트를 공유하지 않는다(지시문:
+  // 이 시스템의 유일한 파괴적 연산이라 다른 두 버튼보다 게이트를 더
+  // 좁히면 안 되고, 오히려 넓혀야 한다). id 하나만 있으면 단다 — bad·
+  // pending·expired 행에도: 망가지거나 끝난 기록을 지우는 게 정확히
+  // 그런 행에서 가장 필요하다. bad 행은 amend 로 못 고치는(형식이 틀려
+  // "고치기" 자체가 뜻이 없는) 기록인데, 지금까지 그런 기록을 없애는
+  // 유일한 경로는 손편집이었다 — 여기서 !r.bad 를 재사용하면 그 경로를
+  // 그대로 다시 막는 꼴이다. onDeleteButtonClick 이 가격을 못 읽는 행은
+  // (bad 기록) 추측해서 보내지 않고 손으로 고치라고 안내한다.
+  if (typeof r.p.id === "string" && r.p.id) {
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "delete-btn";
+    delBtn.textContent = "삭제";
+    delBtn.dataset.id = r.p.id;
+    delBtn.setAttribute("aria-label", "삭제: " + (r.p.name || r.p.code || "?"));
+    wrap.appendChild(delBtn);
   }
   td.appendChild(wrap);
 
@@ -474,6 +554,11 @@ function renderTable(id, list) {
       // 것도 동시에 될 수 없다(아직 buys 자체가 없다) — 괄호 플래그 목록과
       // 섞이지 않는 대괄호로 확실히 구분한다.
       mark = " [대기]";
+    } else if (r.expired) {
+      // pending 과 같은 이유로 대괄호 — 기한을 넘겨 끝난 관찰도 buys 가
+      // 계속 비어 있어 bad/needsAdjustReview/mismatch/halted 어느 것도
+      // 동시에 될 수 없다.
+      mark = " [만료]";
     } else {
       const flags = [];
       if (r.needsAdjustReview) flags.push("액면조정 확인 필요");
@@ -485,10 +570,21 @@ function renderTable(id, list) {
     cell(tr, fmt(r.buy));
     cell(tr, fmt(r.now));
     cell(tr, fmtPct(r.ret), cls(r.ret));
-    // pending 은 아직 보유가 시작되지 않아 "범위 밖"(=달력 범위 밖이라 못
-    // 구함)이라는 문구가 사실과 다르게 읽힌다 — 아직 세기 시작도 안 했다는
-    // 뜻으로 "-" 를 쓴다.
-    cell(tr, r.pending ? "-" : (r.held === null ? "범위 밖" : r.held + "일"));
+    // pending 은 남은 관찰 기간(remainingDays 를 구할 수 있으면)을 보여준다
+    // — "범위 밖"(=달력 범위 밖이라 못 구함)이라는 문구는 이미 보유가
+    // 시작된 기록에나 맞는 말이라 아직 세기 시작도 안 한 pending 에는
+    // 사실과 다르게 읽힌다. expired 는 더 이상 셀 보유일수 자체가 없으므로
+    // "-"다(만료 시점은 표에 안 보이지만 watch.expired_on 에 남아있다).
+    let heldCell;
+    if (r.pending) {
+      heldCell = r.remainingDays === null ? "-"
+               : (r.remainingDays >= 0 ? "D-" + r.remainingDays : "기한 지남");
+    } else if (r.expired) {
+      heldCell = "-";
+    } else {
+      heldCell = r.held === null ? "범위 밖" : r.held + "일";
+    }
+    cell(tr, heldCell);
     cell(tr, r.p.source || "(출처 없음)");   // positions.json 은 normalize() 를 안 거친다 — 필드 누락 가능
     tb.appendChild(tr);
   }
@@ -535,12 +631,20 @@ function renderSummary(list, quotes) {
   // 미결 건수 — 설계 §11 의 한계를 화면이 드러내야 한다. 2차·3차가 끝내
   // 안 걸리고 익절도 안 닿은 종목은 손절 경로가 없어 영원히 열려 있다.
   // 이걸 안 보여주면 승률이 "닫힌 것 중 이긴 비율"이라는 사실이 가려져서,
-  // 미결이 쌓일수록 실제보다 좋아 보인다.
-  const openRows = list.filter(r => !r.closed && !r.bad && !r.pending);
+  // 미결이 쌓일수록 실제보다 좋아 보인다. expired 는 여기서도 뺀다 —
+  // "아직 안 끝났다"(미결)와 "기한을 넘겨 안 샀다"(만료)는 다른 이야기다.
+  const openRows = list.filter(r => !r.closed && !r.bad && !r.pending && !r.expired);
   add("미결", openRows.length + "건");
   const openHeld = openRows.filter(r => r.held !== null);
   add("미결 평균 보유", openHeld.length
     ? (openHeld.reduce((s, r) => s + r.held, 0) / openHeld.length).toFixed(1) + "일" : "-");
+
+  // 만료 건수 — "이 스크리너의 신호가 기한 안에 목표가에 안 닿았다"도
+  // 그 자체로 결과다(지시문 결정 4). 승률·평균수익률·미결 어디에도 안
+  // 들어가는 대신, 그 사실 자체를 여기 숫자로 남긴다 — 안 보여주면 이
+  // 신호들이 통계에서 그냥 사라진 것처럼 보인다.
+  const expiredCount = list.filter(r => r.expired).length;
+  add("만료", expiredCount + "건");
 
   // 출처별 — 이 트래커의 존재 이유
   // 출처는 일부러 고정 목록으로 검증하지 않는다 — 스크리너가 하나 늘면
@@ -937,6 +1041,13 @@ function setExitFieldsVisible(v) {
 function setWatchFieldVisible(v) {
   document.getElementById("watch-field").hidden = !v;
   document.getElementById("watch-price").required = v;
+  // #watch-days 도 같은 함정을 갖는다 — hidden 과 required 를 항상 같이
+  // 켜고 끈다. applyMode() 의 네 갈래가 전부 이 함수 하나를 통해서만
+  // #watch-field 를 건드리므로, 여기 한 곳에 추가하는 것만으로 "모든
+  // 모드가 이 요소도 설정한다"는 불변식이 그대로 유지된다 — applyMode()
+  // 자체를 네 곳 다 고칠 필요가 없다.
+  document.getElementById("watch-days-field").hidden = !v;
+  document.getElementById("watch-days").required = v;
 }
 
 // #source 는 고정 5개 옵션 select 다(매입 모드는 항상 이 중 하나만 쓴다).
@@ -1001,6 +1112,57 @@ function onAutoToggleButtonClick(e) {
   // 가 받는다.
   writeRecord({ op: "auto", id, was: code, auto: nextAuto },
               (nextAuto ? "AUTO-ON " : "AUTO-OFF ") + name, name);
+}
+
+// 삭제 — 이 시스템의 유일한 파괴적 연산이라(models.apply_delete 독스트링)
+// 다른 두 버튼(고치기/자동 토글)보다 더 엄격하게 다룬다. 같은 위임 클릭
+// 패턴(renderTable 이 tbody 를 매 렌더마다 통째로 비운다)과, 자동 토글과
+// 같은 즉시-전송(폼을 거치지 않음) 방식을 쓴다.
+//
+// was_price 의 출처는 표가 이미 그린 값이지 다시 계산하지 않는다 —
+// STATE 는 main() 이 받아온 스냅샷이라 amendTarget/startAmend 와 같은
+// 이유로 여기서도 그대로 쓴다(재조회는 서버가 어차피 id+was+was_price
+// 셋 다로 다시 대조한다 — 이 화면은 "무엇을 지우자는 건지" 보여주는
+// 역할까지만 하면 된다). 가격 출처는 models.apply_delete 와 같은 구분:
+// pending/expired 는 watch.price(아직 안 샀거나 끝내 안 사서 매입가
+// 자체가 없다), 그 외는 buys[0].price.
+//
+// bad 기록(가격을 안전하게 못 읽음)은 여기서 절대 추측하지 않는다 —
+// 잘못 짐작한 값을 보내면 서버 대조에서 막히긴 하지만, 그건 "왜 안
+// 되지"를 사용자가 직접 겪게 만드는 것뿐이다. 애초에 "이 기록은 손으로
+// 고쳐야 한다"고 바로 안내하고 아무것도 보내지 않는 쪽이 정직하다.
+function onDeleteButtonClick(e) {
+  const btn = e.target.closest(".delete-btn");
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const p = STATE.positions.find(x => x.id === id);
+  if (!p) {
+    alert("이 기록을 표에서 찾을 수 없습니다 — 새로고침 후 다시 시도해주세요.");
+    return;
+  }
+  const name = p.name || p.code || "?";
+  const code = p.code || "?";
+
+  let price = null;
+  if (p.status === "pending" || p.status === "expired") {
+    if (p.watch && typeof p.watch.price === "number") price = p.watch.price;
+  } else if (isReadablePosition(p)) {
+    price = p.buys[0].price;
+  }
+  if (price === null) {
+    alert("이 기록은 가격을 읽을 수 없어 자동으로 지울 수 없습니다 — "
+      + "positions.json 을 손으로 고쳐야 합니다.");
+    return;
+  }
+
+  const question = name + "(" + code + ") " + fmt(price) + "원 기록을 지웁니다.\n\n"
+    + "되돌릴 수 없습니다. 계속할까요?";
+  if (!confirm(question)) return;
+  // await 하지 않는다 — onAutoToggleButtonClick 과 같은 팝업 차단 회피
+  // 요령(writeRecord() 의 window.open 이 아직 이 클릭 이벤트와 같은 동기
+  // 구간 안에서 실행돼야 한다).
+  writeRecord({ op: "delete", id, was: code, was_price: price },
+              "DELETE " + name, name);
 }
 
 // id 로 STATE 에서 기록을 찾아 amend 폼을 채운다. **재조회하지 않는다** —
@@ -1117,6 +1279,7 @@ function exitAmendMode() {
   // 상태가 된다(다음 #entry-mode change 나 #q input 이 있기 전까지).
   document.getElementById("entry-mode").value = "buy";
   document.getElementById("watch-price").value = "";
+  document.getElementById("watch-days").value = "5";
   applyMode("buy");
   fillCandidates("");
 }
@@ -1568,7 +1731,18 @@ async function onSubmit(ev) {
   const name = NAMES.get(code) || code;
 
   if (watching) {
-    const payload = { op: "watch", code, name, price, date,
+    // "며칠 이내에 N원에 닿으면 자동 매수" — days 가 그 "며칠 이내에"다.
+    // parsePrice() 로 콤마·공백을 지운 뒤 1~60 사이의 정수인지 확인한다
+    // (서버 쪽 models._watch_days 와 같은 범위 — 상한 60 의 근거는 그
+    // 함수 옆 주석 참조: 분봉 재생 창은 7거래일뿐이라는 사실을 인지한
+    // 넉넉한 안전 상한이지, 정밀도 보장이 아니다). Number.isInteger 로
+    // 소수(예: "3.5")도 막는다 — parsePrice 는 콤마만 지울 뿐 정수인지는
+    // 안 본다.
+    const days = parsePrice(document.getElementById("watch-days").value);
+    if (!(Number.isInteger(days) && days >= 1 && days <= 60)) {
+      return alert("관찰 기간은 1~60 거래일 사이의 정수여야 합니다.");
+    }
+    const payload = { op: "watch", code, name, price, date, days,
       source: document.getElementById("source").value,
       memo: document.getElementById("memo").value };
     await writeRecord(payload, "WATCH " + name, name);
@@ -1610,6 +1784,11 @@ document.getElementById("closed").addEventListener("click", onAmendButtonClick);
 // 에 걸어도 해가 되진 않지만, 실제로 쓰이지 않을 리스너를 다는 대신
 // 렌더가 실제로 그 버튼을 두는 표 하나에만 건다.
 document.getElementById("open").addEventListener("click", onAutoToggleButtonClick);
+// 삭제 버튼은 고치기와 달리 #open/#closed 양쪽 다 그려진다(bad/pending/
+// expired 는 status 값에 따라 어느 표에든 있을 수 있고, 정상 종결 기록은
+// #closed 에 있다) — 그래서 amend 와 같은 두 표 모두에 건다.
+document.getElementById("open").addEventListener("click", onDeleteButtonClick);
+document.getElementById("closed").addEventListener("click", onDeleteButtonClick);
 
 // main() 은 더 이상 이 자리에서 즉시 실행되지 않는다 — 통과 커튼(맨 아래
 // 절)이 통과된 뒤에만(이미 통과해 있었으면 로드 즉시, 아니면 #gate-form

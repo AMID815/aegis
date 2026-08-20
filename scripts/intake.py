@@ -101,6 +101,8 @@ def apply(state: dict, req: dict, changed_id: list | None = None) -> dict:
         return models.apply_auto(state, req)
     if op == "watch":
         return models.apply_watch(state, req)
+    if op == "delete":
+        return models.apply_delete(state, req)
     raise models.RejectedError(f"모르는 op: {op!r}")
 
 
@@ -193,6 +195,21 @@ def main() -> int:
         return 3
     prior_count = len(state["positions"])
     changed_id = []   # amend 전용 out-parameter — apply() 참조
+    op = req.get("op")
+
+    # orders/auto/delete 는 id+was 로 기존 기록 하나를 겨눈다(models._target)
+    # — buy/watch 와 달리 req 자체엔 name/date 가 없다(대상은 이미 존재하는
+    # 기록이지 이번에 적어 낸 값이 아니다). delete 는 반영되면 그 기록이
+    # out 에서 사라져 나중엔 못 찾으므로, 세 op 모두 반영 **전** 여기
+    # state(정규화까지 끝난 상태)에서 미리 떠 둔다 — orders/auto 는 반영
+    # 후에도 살아있지만 굳이 다른 시점을 쓰지 않고 통일한다. 이 값은 뒤에서
+    # 커밋 메시지를 만들 때 amend 와 똑같이 _single_line 을 거쳐서만 쓴다
+    # (기존 기록의 저장된 name 은 req 의 name 만큼이나 못 믿는다 — 손편집이
+    # 남긴 개행이 그대로 실려올 수 있다).
+    id_target = None
+    if op in ("orders", "auto", "delete"):
+        id_target = next(
+            (p for p in state["positions"] if p.get("id") == req.get("id")), None)
 
     try:
         out = apply(state, req, changed_id)
@@ -207,18 +224,31 @@ def main() -> int:
         print(f"거부: {e}")
         return 2
 
-    if len(out["positions"]) < prior_count:
+    if op == "delete":
+        # delete(이 함수의 "nothing else" 범위 밖으로 튀어나온 한 가지
+        # 예외) 는 정확히 1건 줄어드는 게 **정상**이다 — apply_delete 가
+        # 대상 하나를 배열에서 뺀다. 아래 벨트 앤 브레이시스는 "buy 는
+        # +1, sell 은 개수 불변"을 전제로 삼는데 delete 는 그 전제를 깬다
+        # — 그대로 두면 delete 는 intake.main() 을 통해서는 단 한 번도
+        # 성공할 수 없다(실측: 항상 이 AssertionError). 그래서 delete 만
+        # 별도로, "정확히 1건 감소"를 기대치로 검사한다 — 1건보다 더
+        # 줄거나 안 줄면 여전히 코드 버그다.
+        if len(out["positions"]) != prior_count - 1:
+            raise AssertionError(
+                f"삭제 후 보유 건수가 예상과 다름({prior_count} → "
+                f"{len(out['positions'])}, 정확히 1건 감소를 기대함) "
+                f"— 쓰지 않고 중단, 코드 버그 의심")
+    elif len(out["positions"]) < prior_count:
         # 벨트 앤 브레이시스: 여기까지 온 이상 위의 가드들(최상위 구조,
         # dropped)이 전부 통과했으니 정상적으로는 절대 줄어들 수 없다
-        # (buy 는 +1, sell 은 개수 불변). 그런데도 줄었다면 이 코드
-        # 자신의 버그이지 사용자 입력도 파일 손상도 아니다 — "고쳐서
-        # 다시 제출"도 "파일을 손보라"도 오답이라 2/3/4 어디에도 넣지
-        # 않고 시끄럽게 죽는다.
+        # (buy 는 +1, sell 은 개수 불변, delete 는 위에서 따로 본다).
+        # 그런데도 줄었다면 이 코드 자신의 버그이지 사용자 입력도 파일
+        # 손상도 아니다 — "고쳐서 다시 제출"도 "파일을 손보라"도 오답이라
+        # 2/3/4 어디에도 넣지 않고 시끄럽게 죽는다.
         raise AssertionError(
             f"반영 후 보유 건수가 줄어듦({prior_count} → {len(out['positions'])}) "
             f"— 쓰지 않고 중단, 코드 버그 의심")
 
-    op = req.get("op")
     if op == "amend":
         # amend 는 buy/sell 과 달리 이번 요청이 name 을 안 건드렸을 수
         # 있다(패치 규칙) — 그러면 커밋 메시지용 이름은 "이번에 낸 값"이
@@ -249,6 +279,21 @@ def main() -> int:
         name = _single_line(changed["name"]) or changed["code"]
         pid = _single_line(changed["id"]) or changed["code"]
         message = f"amend: {name} ({pid})"
+        commit_target = pid
+    elif op in ("orders", "auto", "delete"):
+        # amend 와 같은 문제, 출처만 다르다 — id_target 은 위에서(반영
+        # 전에) 같은 state 에서 떠 뒀다. apply() 가 성공했다는 건
+        # models._target() 이 이 id 를 찾았다는 뜻이므로, id_target 이
+        # None 이면 그 자체가 이 코드(혹은 위 사전 캡처)의 버그다 —
+        # amend 의 changed-None 처리와 같은 논리로, 조용히 넘기지 않고
+        # 시끄럽게 죽는다.
+        if id_target is None:
+            raise RuntimeError(
+                f"{op} 반영됐다는데 대상 기록을 못 찾음(id={req.get('id')!r}) "
+                f"— 코드 버그")
+        name = _single_line(id_target["name"]) or id_target["code"]
+        pid = _single_line(id_target["id"]) or id_target["code"]
+        message = f"{op}: {name} ({pid})"
         commit_target = pid
     else:
         # code/date 는 이 시점에 이미 apply() 안의 _code()/_date() 를 통과했다

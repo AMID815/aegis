@@ -39,8 +39,18 @@ const ALLOWED_ORIGIN = "https://amid815.github.io";
 // 모양 점검이다 — 진짜 검증은 intake.py/models.py 가 한다.
 const MAX_PAYLOAD_CHARS = 4000;
 
-const KNOWN_OPS = new Set(["buy", "sell", "amend"]);
-const OP_LABEL = { buy: "BUY", sell: "SELL", amend: "AMEND" };
+// intake.apply()(scripts/intake.py)가 라우팅하는 op 전체 목록과 정확히
+// 같아야 한다 — 새 op 를 추가할 때마다 반드시 여기(와 OP_LABEL)도 같이
+// 고친다. 이 목록이 왜 "models.py 를 다시 구현하지 않는다"는 원칙의
+// 유일한 예외인지, 그리고 동기화가 깨져도 왜 거의 안 보이는지는 아래
+// isPlausiblePayload() 위 설명 참조.
+const KNOWN_OPS = new Set([
+  "buy", "sell", "amend", "watch", "orders", "auto", "delete",
+]);
+const OP_LABEL = {
+  buy: "BUY", sell: "SELL", amend: "AMEND",
+  watch: "WATCH", orders: "ORDERS", auto: "AUTO", delete: "DELETE",
+};
 
 // ── CORS ────────────────────────────────────────────────────────────────
 
@@ -113,6 +123,22 @@ function normalizePassphrase(raw) {
 // 잘 처리한다. 여기서 더 엄격하게 굴면 두 곳의 규칙이 갈라져(예: Worker는
 // 통과시켰는데 intake 는 거부, 혹은 그 반대) 사용자가 "Worker 는 됐다는데
 // 왜 이슈엔 거부 코멘트가 달리지" 하는 혼란만 는다.
+//
+// 이 원칙에 예외가 딱 하나 있다: KNOWN_OPS(위)는 필드 값 검증이 아니라
+// "op 라는 이름 자체를 아는가"라서 위 비-중복 논리가 안 통한다 —
+// intake.apply() 가 아는 op 목록이 바로 여기 있고, 다른 데서 다시
+// 베낄 수도 없다. 그런데 이 목록이 낡아도(intake.apply() 는 새 op 를
+// 아는데 여기는 모르는 상태) 거의 안 보인다는 게 함정이다: 패스프레이즈
+// 검사가 이 검사보다 먼저 실행되므로(아래 fetch 핸들러), 패스프레이즈가
+// 틀린 프로브는 op 값과 무관하게 항상 401 로 막혀 이 400 이 절대
+// 드러나지 않는다. 정상 패스프레이즈를 가진 **진짜 사용자**가 새 op 를
+// 실제로 써야만 드러나므로, 흔한 배포 후 스모크 테스트("틀린
+// 패스프레이즈로 401 이 오나"만 확인)로는 절대 못 잡는다 — 실측:
+// watch/orders/auto/delete 가 models.py·intake.py 에는 이미 구현돼
+// 있는데 KNOWN_OPS 는 buy/sell/amend 셋뿐이던 채로 배포돼 있었다
+// (2026-08-21 발견, 실제 사용자 요청에서만 드러남). models.py 에 op 를
+// 하나 추가하고 intake.apply() 에 라우팅을 연결할 때마다, KNOWN_OPS(와
+// OP_LABEL)도 반드시 같이 고친다.
 function isPlausiblePayload(payload) {
   return (
     payload !== null &&
@@ -222,9 +248,13 @@ export default {
     }
 
     if (!isPlausiblePayload(payload)) {
+      // 허용 op 를 여기 다시 하드코딩하지 않는다 — 문자열 그대로 베껴
+      // 놓으면 이 메시지 자체가 KNOWN_OPS 와 또 따로 낡을 수 있다(바로
+      // 위 KNOWN_OPS 가 겪은 함정과 같은 모양). KNOWN_OPS 에서 그때그때
+      // 뽑아 쓴다.
       return json(400, {
         ok: false,
-        error: "payload 형식이 올바르지 않습니다(op: buy/sell/amend 필요).",
+        error: `payload 형식이 올바르지 않습니다(op: ${[...KNOWN_OPS].join("/")} 필요).`,
       });
     }
 

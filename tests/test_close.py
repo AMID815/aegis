@@ -764,7 +764,7 @@ def test_일봉_실패가_있으면_자동체결을_건너뛴다(monkeypatch):
     쓴것 = []
     _기본_준비(monkeypatch, write_capture=쓴것)
     monkeypatch.setattr(close.autofill, "run",
-                        lambda bars, day: called.append(day) or 0)
+                        lambda bars, day, days: called.append(day) or 0)
     monkeypatch.setattr(close.naver, "fetch_bars",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("네트워크")))
     close.main()
@@ -777,12 +777,16 @@ def test_일봉이_멀쩡하면_받아둔_봉을_그대로_넘긴다(monkeypatch
     쓴것 = []
     _기본_준비(monkeypatch, write_capture=쓴것)
     monkeypatch.setattr(close.autofill, "run",
-                        lambda bars, day: got.update(bars=bars, day=day) or 0)
+                        lambda bars, day, days: got.update(bars=bars, day=day, days=days) or 0)
     close.main()
     assert "bars" in got, "자동 체결이 호출되지 않았다"
     assert isinstance(got["bars"], dict)
     assert "005930" in got["bars"]
     assert got["day"] == ALL_DAYS[-1]       # 확정 대상 거래일이 넘어간다
+    # 지정가 관찰의 기한(watch.days)이 거래일로 셀 것을 요구한다 —
+    # close.py 가 이미 받아둔 거래일 달력을 새로 조회하지 않고 그대로
+    # 넘기는지 확인한다(일봉을 재사용하는 것과 같은 이유).
+    assert got["days"] == ALL_DAYS
 
 
 def test_자동체결_쓰기_실패는_close_종료코드에_반영된다(monkeypatch):
@@ -790,6 +794,6 @@ def test_자동체결_쓰기_실패는_close_종료코드에_반영된다(monkey
     안 된다(close.py 의 problems 관례)."""
     쓴것 = []
     _기본_준비(monkeypatch, write_capture=쓴것)
-    monkeypatch.setattr(close.autofill, "run", lambda bars, day: 1)
+    monkeypatch.setattr(close.autofill, "run", lambda bars, day, days: 1)
     rc = close.main()
     assert rc == 1

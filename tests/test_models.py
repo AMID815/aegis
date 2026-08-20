@@ -1106,6 +1106,7 @@ def test_buys가_없으면_1차가_대조는_건너뛴다():
     dropped = []
     st = models.normalize({"schema": 1, "positions": [{
         "code": "005930", "buys": [], "status": "pending",
+        "watch": {"price": 240000, "date": "2026-08-20", "days": 3},
         "orders": {"buy2": 94000, "buy3": 88000}}]}, dropped)
     # pending 은 buys 가 비어 있어도 더 이상 격리되지 않는다(Task 12) —
     # 여기서 확인하는 건 orders 검증이 buys[0] 대조를 건너뛰고도(빈
@@ -1293,14 +1294,14 @@ def test_지정가_관찰은_pending_으로_들어간다():
     p = st["positions"][0]
     assert p["status"] == "pending"
     assert p["buys"] == []
-    assert p["watch"] == {"price": 240000, "date": "2026-08-20"}
+    assert p["watch"] == {"price": 240000, "date": "2026-08-20", "days": 5}
 
 
 def test_pending_은_normalize_를_통과한다():
     """buys 가 비어 있어도 격리되면 안 된다 — 아직 안 산 기록이다."""
     st = models.normalize({"schema": 1, "positions": [{
         "code": "005930", "buys": [], "status": "pending",
-        "watch": {"price": 240000, "date": "2026-08-20"}}]})
+        "watch": {"price": 240000, "date": "2026-08-20", "days": 3}}]})
     assert len(st["positions"]) == 1
 
 
@@ -1368,3 +1369,275 @@ def test_이미_체결된_대기주문은_다시_체결되지_않는다():
     st = models.apply_watch_fill(st, "20260820-005930", "2026-08-21", "202608210931")
     with pytest.raises(models.RejectedError):
         models.apply_watch_fill(st, "20260820-005930", "2026-08-22", "202608220931")
+
+
+# ── 지정가 관찰의 기한(watch.days) ────────────────────────────────────────
+# "며칠 이내에 N원에 닿으면 자동 매수" — 지금까지는 "며칠 이내에"가 빠져
+# 있었다. 대기 주문이 영원히 살아있으면, 신호가 다음날 닿은 것과 반년 뒤에
+# 닿은 것이 같은 "성공"으로 기록되어 스크리너 비교가 오염된다.
+
+
+def test_기간을_안_주면_기본값_5이다():
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000})
+    assert st["positions"][0]["watch"]["days"] == 5
+
+
+def test_명시한_기간이_반영된다():
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000, "days": 10})
+    assert st["positions"][0]["watch"]["days"] == 10
+
+
+@pytest.mark.parametrize("days", [0, -1, 61, True, "3", 3.5])
+def test_기간이_이상하면_거부한다(days):
+    """0/음수/61(상한 초과)/bool(파이썬에서 int 의 서브클래스라 별도로
+    막아야 함)/문자열/소수 — 전부 거부한다."""
+    with pytest.raises(models.RejectedError):
+        models.apply_watch(models.empty_state(), {
+            "op": "watch", "code": "005930", "name": "삼성전자",
+            "date": "2026-08-20", "price": 240000, "days": days})
+
+
+@pytest.mark.parametrize("days", [0, -1, 61, True, "5", 3.5])
+def test_normalize가_손편집된_기간을_격리한다(days):
+    """days 가 **있는데** 모양이 틀리면(0/음수/60초과/bool/문자열/소수) 여전히
+    손편집 흔적이다 — 아래 하위호환 테스트(days 가 아예 없는 경우)와 반드시
+    구분해야 한다. 이 구분이 무너지면(예: "없거나 틀리면 다 기본값" 으로
+    되돌리면) 손편집으로 망가진 값이 조용히 기본 관찰기간으로 둔갑한다."""
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [], "status": "pending",
+        "watch": {"price": 240000, "date": "2026-08-20", "days": days}}]}, dropped)
+    assert st["positions"] == []
+    assert len(dropped) == 1
+
+
+def test_days_없는_옛_pending_기록은_기본값을_받는다():
+    """watch.days(이 브랜치가 추가한 필드) 이전에 만들어진 pending 기록은
+    watch 에 {price, date} 두 키만 있고 days 가 아예 없다 — 이걸 손상으로
+    보고 격리하면 실제로 기다리고 있던 대기 주문이 화면과 autofill 에서
+    통째로 사라진다("옛 pending 기록이 격리되지 않게" CHANGE 2). 없는 것과
+    있는데 틀린 것은 다르다 — normalize() 는 후자만 격리하고, 전자는
+    기본값을 채워 넣는다(다른 선택 필드에 이미 쓰는 setdefault 관례와 같다)."""
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [], "status": "pending",
+        "watch": {"price": 240000, "date": "2026-08-20"}}]}, dropped)   # days 없음
+    assert len(st["positions"]) == 1
+    assert dropped == []
+    assert st["positions"][0]["watch"]["days"] == 5
+
+
+def test_days_없는_옛_expired_기록도_기본값을_받는다():
+    """pending 뿐 아니라 expired 도 never_bought(buys 가 비어 있음) 라서
+    같은 검증·같은 기본값 채움을 거친다 — pending 만 다루면 expired 쪽의
+    옛 기록은 여전히 격리된다."""
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [], "status": "expired",
+        "watch": {"price": 240000, "date": "2026-08-20", "expired_on": "2026-08-26"}}]},
+        dropped)   # days 없음
+    assert len(st["positions"]) == 1
+    assert dropped == []
+    assert st["positions"][0]["watch"]["days"] == 5
+
+
+def test_normalize가_손편집된_가격을_격리한다():
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [], "status": "pending",
+        "watch": {"price": -1, "date": "2026-08-20", "days": 3}}]}, dropped)
+    assert st["positions"] == []
+    assert len(dropped) == 1
+
+
+def test_normalize가_손편집된_날짜를_격리한다():
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [], "status": "pending",
+        "watch": {"price": 240000, "date": "2026-13-40", "days": 3}}]}, dropped)
+    assert st["positions"] == []
+    assert len(dropped) == 1
+
+
+def test_normalize가_dict가_아닌_watch를_격리한다():
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [], "status": "pending",
+        "watch": [240000, "2026-08-20"]}]}, dropped)
+    assert st["positions"] == []
+    assert len(dropped) == 1
+
+
+def test_normalize가_멀쩡한_watch는_통과시킨다():
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [], "status": "pending",
+        "watch": {"price": 240000, "date": "2026-08-20", "days": 3}}]}, dropped)
+    assert len(st["positions"]) == 1
+    assert dropped == []
+
+
+# ── apply_expire ────────────────────────────────────────────────────────
+
+def test_기한이_지나면_expired로_바뀐다():
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000, "days": 3})
+    pid = "20260820-005930"
+    out = models.apply_expire(st, pid, "2026-08-26")
+    p = out["positions"][0]
+    assert p["status"] == "expired"
+    assert p["buys"] == []
+    assert p["watch"]["expired_on"] == "2026-08-26"
+    # price/date/days 는 그대로 남는다 — "무엇을 놓쳤는지"가 계속 읽혀야 한다
+    assert p["watch"]["price"] == 240000
+    assert p["watch"]["days"] == 3
+
+
+def test_expired_기록은_normalize를_통과한다():
+    """apply_expire 가 만든 것을 normalize 가 격리하면 안 된다 — 만료된
+    기록이 다음 읽기에서 사라져 "그 기간엔 없었다는 사실"이 지워진다."""
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000})
+    out = models.apply_expire(st, "20260820-005930", "2026-08-26")
+    dropped = []
+    assert len(models.normalize(out, dropped)["positions"]) == 1
+    assert dropped == []
+
+
+def test_pending이_아니면_만료를_거부한다():
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000})
+    st = models.apply_watch_fill(st, "20260820-005930", "2026-08-21", "202608210931")
+    with pytest.raises(models.RejectedError):
+        models.apply_expire(st, "20260820-005930", "2026-08-26")
+
+
+def test_이미_만료된_기록을_다시_만료시키면_거부한다():
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000})
+    st = models.apply_expire(st, "20260820-005930", "2026-08-26")
+    with pytest.raises(models.RejectedError):
+        models.apply_expire(st, "20260820-005930", "2026-08-27")
+
+
+def test_만료_대상이_없으면_거부한다():
+    with pytest.raises(models.RejectedError):
+        models.apply_expire(models.empty_state(), "20260820-005930", "2026-08-26")
+
+
+# ── CHANGE 3: apply_delete — 이 시스템의 유일한 파괴적 연산 ──────────────────
+# 지금까지 스퍼리어스한(있어서는 안 될) 기록을 지우는 유일한 경로는
+# 손편집이었다(apply_amend 독스트링의 "잔여 한계" 참조). was_price 를
+# apply_amend 와 달리 여기서는 필수로 둔다 — 이유는 apply_delete 자체의
+# 독스트링에 있다: id 재사용 사고를 amend 는 감수하지만(잘못 고쳐도
+# 되돌릴 수 있다) delete 는 감수하지 않는다(지운 건 되돌릴 수 없다).
+# AlreadyApplied 케이스가 없다는 것도 같은 이유다 — "이미 지워짐"과
+# "애초에 없었음"을 이 함수가 구분할 방법이 없어, 조용히 성공 취급하면
+# 엉뚱한 id 를 겨눈 삭제 요청도 "성공"으로 보인다.
+
+
+def test_delete는_기록을_완전히_지운다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    out = models.apply_delete(d, {
+        "op": "delete", "id": "20260819-005930", "was": "005930", "was_price": 247500})
+    assert out["positions"] == []
+
+
+def test_delete에서_was가_다르면_거부한다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    with pytest.raises(models.RejectedError):
+        models.apply_delete(d, {
+            "op": "delete", "id": "20260819-005930", "was": "000660", "was_price": 247500})
+
+
+def test_delete에서_was_price가_불일치하면_거부한다():
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    with pytest.raises(models.RejectedError):
+        models.apply_delete(d, {
+            "op": "delete", "id": "20260819-005930", "was": "005930", "was_price": 999999})
+
+
+def test_delete에서_was_price가_없으면_거부한다():
+    """amend 와 달리 delete 는 was_price 가 선택이 아니라 필수다 — 삭제는
+    되돌릴 수 없어 id 재사용 사고를 amend 처럼 감수할 수 없다(apply_delete
+    독스트링 참조)."""
+    d = models.apply_buy(models.empty_state(), {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19"})
+    with pytest.raises(models.RejectedError):
+        models.apply_delete(d, {
+            "op": "delete", "id": "20260819-005930", "was": "005930"})
+
+
+def test_delete에서_없는_id는_거부한다():
+    with pytest.raises(models.RejectedError):
+        models.apply_delete(models.empty_state(), {
+            "op": "delete", "id": "20260101-999999", "was": "005930", "was_price": 100000})
+
+
+def test_delete는_pending_기록을_watch_price로_대조해_지운다():
+    """pending 은 buys 가 비어 있다 — 대조할 가격이 buys[0].price 가 아니라
+    watch.price 다."""
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000})
+    out = models.apply_delete(st, {
+        "op": "delete", "id": "20260820-005930", "was": "005930", "was_price": 240000})
+    assert out["positions"] == []
+
+
+def test_delete는_pending_기록에서_watch_price가_불일치하면_거부한다():
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000})
+    with pytest.raises(models.RejectedError):
+        models.apply_delete(st, {
+            "op": "delete", "id": "20260820-005930", "was": "005930", "was_price": 999999})
+
+
+def test_delete는_expired_기록도_watch_price로_대조해_지운다():
+    """expired 도 pending 과 마찬가지로 buys 가 비어 있다 — 같은 대조를 쓴다."""
+    st = models.apply_watch(models.empty_state(), {
+        "op": "watch", "code": "005930", "name": "삼성전자",
+        "date": "2026-08-20", "price": 240000})
+    st = models.apply_expire(st, "20260820-005930", "2026-08-26")
+    out = models.apply_delete(st, {
+        "op": "delete", "id": "20260820-005930", "was": "005930", "was_price": 240000})
+    assert out["positions"] == []
+
+
+def test_delete는_다른_기록을_바이트단위로_그대로_둔다():
+    """대상만 지우고 나머지 기록은 완전히 그대로다 — test_intake.py 의
+    test_amend은_여러_기록_중_대상만_고치고_형제는_바이트단위로_그대로다
+    와 같은 방식(정규화된 원본과 통째로 == 비교)을 apply_delete 에도 쓴다."""
+    import copy as _copy
+    d = models.apply_buy(models.empty_state(), {
+        "code": "000660", "name": "SK하이닉스", "price": 200000, "date": "2026-08-01",
+        "memo": "메모1"})
+    d = models.apply_buy(d, {
+        "code": "005930", "name": "삼성전자", "price": 247500, "date": "2026-08-19",
+        "source": "종가베팅", "memo": "눌림", "signal_date": "2026-08-18"})
+    d = models.apply_buy(d, {
+        "code": "035420", "name": "NAVER", "price": 210000, "date": "2026-08-05"})
+    원본 = _copy.deepcopy(d)
+
+    out = models.apply_delete(d, {
+        "op": "delete", "id": "20260819-005930", "was": "005930", "was_price": 247500})
+
+    by_id = {p["id"]: p for p in out["positions"]}
+    assert len(by_id) == 2
+    assert "20260819-005930" not in by_id
+
+    정규화된_원본 = {p["id"]: p for p in models.normalize(원본)["positions"]}
+    for sib_id in ("20260801-000660", "20260805-035420"):
+        assert by_id[sib_id] == 정규화된_원본[sib_id]   # 형제 기록은 완전히 그대로

@@ -48,3 +48,29 @@ def missing(days: list, n: int, have: Iterable[str]) -> list:
 
 def too_short(days: list, need: int) -> bool:
     return len(days) < need
+
+
+def watch_deadline(days_list: list, watch_date: str, n: int) -> str | None:
+    """지정가 관찰(watch)이 살아있는 마지막 거래일 — 이 날짜까지 목표가에
+    안 닿으면 만료다.
+
+    `watch_date` 당일은 세지 않는다 — 관찰은 장 마감 뒤에 등록되므로
+    그날은 이미 지난 하루다. 다음 거래일부터 `n` 거래일째가 마감일이다.
+    예: n=3, watch_date=목요일(달력에 08-20,21,24,25,26 ... 주말은 애초에
+    달력에 없다) → 금(21)·월(24)·화(25)가 유효, 화요일이 마감일 — 달력일로
+    센 금·토·일이 아니다. `며칠 밀렸다` 카운트는 거래일로 세라는 이 저장소의
+    공유 규약(시장달력_공유노트.md) 그대로다.
+
+    달력이 답할 수 없으면(watch_date 가 달력 밖이거나, 그 뒤로 n 거래일이
+    아직 안 쌓였으면) None 이다 — **만료로 판단하지 않는다.** 만료는
+    되돌릴 수 없는 조작(status 를 EXPIRED 로 바꾸는 쓰기)이라, 달력이
+    짧다는 이유로 잘못 만료시키면 그 대가가 훨씬 크다 — held_days 가
+    클램프 대신 None 을 돌려주는 것과 같은 태도(모듈 독스트링 참조).
+    """
+    idx = {d: i for i, d in enumerate(days_list)}
+    if watch_date not in idx:
+        return None
+    deadline_i = idx[watch_date] + n
+    if deadline_i >= len(days_list):
+        return None
+    return days_list[deadline_i]

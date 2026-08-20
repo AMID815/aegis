@@ -4,8 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
+<!--
+  connect-src 의 REPLACE_WITH_YOUR_WORKER_URL 은 자리표시자다 — Cloudflare
+  Worker(worker/README.md 4단계)를 배포한 뒤 실제 주소로 바꿀 것. app.js 의
+  WORKER_URL 상수와 정확히 같은 문자열이어야 한다(호스트만, 끝 슬래시 없이).
+  둘 중 하나만 바꾸면(또는 둘 다 자리표시자 그대로면) fetch 가 여기 CSP 에
+  막혀 거부되는데, app.js 는 이걸 "Worker 연결 실패"와 구분하지 않고 같은
+  깃허브 폴백 경로로 처리한다 — 조용히 고장 나는 대신 조용히 폴백만 계속
+  쓰는 상태가 된다(안전하지만 의도한 대로 Worker 를 쓰고 있는지는 따로
+  확인해야 한다).
+-->
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'self'; connect-src 'self' https://raw.githubusercontent.com; script-src 'self'; style-src 'self'">
+      content="default-src 'self'; connect-src 'self' https://raw.githubusercontent.com https://REPLACE_WITH_YOUR_WORKER_URL; script-src 'self'; style-src 'self'">
 <!--
   검색이 지나가는 사람이 이 페이지에 닿는 가장 흔한 경로다. noindex 는
   값싸고, 아래 통과 커튼(#gate)보다 오히려 이 경로엔 더 실효적이다 —
@@ -189,10 +199,20 @@
       <label for="memo">메모(선택)</label>
       <input id="memo" placeholder="메모(선택)" maxlength="200">
     </div>
-    <button type="submit" id="submit-btn">깃허브에서 저장</button>
+    <button type="submit" id="submit-btn">저장</button>
     <button type="button" id="cancel-btn" hidden>취소</button>
   </form>
-  <p class="hint">버튼을 누르면 깃허브 이슈 화면이 열립니다. 거기서 한 번 더 누르면 반영됩니다.</p>
+  <!--
+    #result — 제출 결과를 이 화면 안에서 바로 보여준다(Worker 연동, app.js
+    writeRecord()/renderResult() 가 채운다). 성공/폴백/막힘 세 종류를 클래스로
+    구분한다(style.css). #stale 과 같은 textContent 전용·role=status 패턴을
+    쓴다 — 다만 성공 시 이슈 링크 하나(<a>)는 예외적으로 자식 요소로 만든다
+    (그것도 createElement + textContent 로만 채운다, innerHTML 은 여전히
+    어디서도 안 쓴다).
+  -->
+  <div id="result" class="result" role="status" aria-live="polite" hidden></div>
+  <p class="hint">버튼을 누르면 우선 저장을 바로 시도합니다. Worker 에 닿지 않으면
+    깃허브 이슈 화면이 대신 열립니다 — 그때는 거기서 한 번 더 눌러야 반영됩니다.</p>
 </section>
 
 </div><!-- #content -->

@@ -1,0 +1,11 @@
+# 모의고사 쓰기 프록시 — Cloudflare Worker 설정.
+# 배포/시크릿 설정 절차는 worker/README.md 를 따를 것. 이 파일에는 시크릿을
+# 절대 평문으로 적지 않는다 — GATE_PASS/GH_TOKEN 은 `wrangler secret put` 으로만
+# 넣는다(README 참고). 이 파일 자체는 저장소에 커밋되어 공개된다.
+
+name = "mouigosa-intake"
+main = "worker.js"
+compatibility_date = "2026-08-20"
+
+# 무료 플랜 기본값 그대로 — 이 Worker 는 요청당 짧은 작업(패스프레이즈 확인
+# + 깃허브 이슈 생성 API 호출) 하나만 하므로 별도 설정이 필요 없다.

@@ -141,6 +141,23 @@ const REPO = "https://github.com/AMID815/mouigosa";
 const STALE_MIN = 40;                // 30분 주기 + 여유 — 장중(is_final=false)에만 쓴다(항목 15)
 const STALE_CONFIRM_DAYS = 4;        // 확정 종가가 이보다 오래 그대로면 경보 — 주말+연휴 흡수용 여유
 
+// Cloudflare Worker 쓰기 프록시 주소 — worker/README.md 4단계에서 실제 배포
+// 주소로 바꾼다. index.html 의 CSP connect-src 안 같은 문자열도 함께 바꿔야
+// 한다(둘 중 하나만 바꾸면 CSP 가 요청을 막는데, isWorkerConfigured() 는 이
+// 문자열만 보고 판단하므로 "설정된 것"으로 오판해 fetch 를 시도했다가
+// CSP 위반으로 실패한다 — tryWorker() 의 catch 가 이것도 네트워크 실패와
+// 똑같이 처리해 폴백으로 넘어가므로 사용자 경험은 안전하지만, 의도한 대로
+// Worker 를 쓰고 있는지는 README 4단계대로 두 곳 다 바꿨는지 확인해야 안다).
+const WORKER_URL = "https://REPLACE_WITH_YOUR_WORKER_URL";
+
+// 이 자리표시자로 남아있는 동안은 fetch 자체를 시도하지 않는다 — 어차피
+// 실패할 요청을 매번 던져 콘솔에 오류만 쌓는 대신, "미설정"임을 바로
+// 판단해 곧장 깃허브 폴백으로 넘어간다(Worker 미배포 상태에서도 이 화면이
+// 예전(Task 13)과 똑같이 동작해야 한다는 요구 그대로).
+function isWorkerConfigured() {
+  return !WORKER_URL.includes("REPLACE_WITH_YOUR_WORKER_URL");
+}
+
 // #stale 배지에 메시지 한 줄을 추가한다 — <ul><li> 로 쌓는다(리뷰: 163자
 // 한 줄로 이어붙이면 375px 화면에서 102px 를 먹는다). textContent 로만
 // 채운다. renderStale·reportFatal·master.json 로드 실패 알림이 전부 이
@@ -736,7 +753,7 @@ function applyMode(mode, opts) {
     modeEl.textContent = "매도 입력 — 보유 중인 종목입니다";
     label.textContent = "매도가";
     srcField.hidden = true;      // 매도에는 출처가 의미 없다
-    btn.textContent = "매도 이슈 열기";
+    btn.textContent = "매도 저장";   // Worker 연동 전엔 "매도 이슈 열기" — 이제 주 경로가 깃허브 이슈를 직접 열지 않는다
     cancelBtn.hidden = true;
     sigField.hidden = true;
     setExitFieldsVisible(false);
@@ -754,7 +771,7 @@ function applyMode(mode, opts) {
     modeEl.textContent = "";
     label.textContent = "매입가";
     srcField.hidden = false;
-    btn.textContent = "깃허브에서 저장";
+    btn.textContent = "저장";   // Worker 연동 전엔 "깃허브에서 저장" — 이제 주 경로가 깃허브 이슈를 직접 열지 않는다
     cancelBtn.hidden = true;
     sigField.hidden = true;
     setExitFieldsVisible(false);
@@ -1029,14 +1046,14 @@ async function onAmendSubmit(ev) {
   // 동기 호출"로 사용자 제스처를 지켜 팝업 차단을 피한다. 여기서는 그
   // 트릭을 못 쓴다 — 아래 재조회(await load) 자체가 이 화면의 핵심
   // 방어라 없앨 수 없다(점 1). 대신 제스처가 아직 살아있는 지금 빈 탭을
-  // 먼저 열어두고, 재조회가 끝나면 그 탭을 실제 URL로 돌린다.
-  // noopener 는 여기서 못 쓴다 — 쓰면 반환값이 null 이 되어 나중에 이
-  // 탭을 다시 찾을 방법이 없다. 목적지가 사용자 입력이 아니라 이 코드가
-  // 고정한 github.com 이슈 생성 URL 이라 opener 노출 위험은 낮다고
-  // 본다. 이 사전 오픈 자체가 막히면(pending=null) 아래에서 예전처럼
-  // 제출 시점에 한 번 더 시도하고, 그마저 막히면 현재 탭에서 이동한다.
+  // 먼저 열어두고, writeRecord() 에 그대로 넘긴다 — Worker 로 끝나면
+  // writeRecord 가 이 탭을 닫고, 깃허브 폴백이 필요하면 이 탭을 그
+  // URL로 돌린다(그 탭을 새로 여는 대신). noopener 를 여기서 못 쓰는
+  // 이유는 그대로다 — 쓰면 반환값이 null 이 되어 나중에 이 탭을 다시
+  // 찾을 방법이 없다. 목적지가 사용자 입력이 아니라 이 코드가 고정한
+  // github.com 이슈 생성 URL 이라 opener 노출 위험은 낮다고 본다.
   const pending = window.open("", "_blank");
-  let redirected = false;   // pending 을 실제 URL로 돌렸는지 — finally 에서 닫을지 판단
+  let handedOff = false;   // writeRecord() 에 pending 을 넘겼는지 — 넘겼으면 그 탭의 운명은 거기서 정해진다
 
   try {
     // allow404 를 안 쓴다(리뷰 I4) — main() 의 최초 로드와 달리 여기서는
@@ -1077,34 +1094,35 @@ async function onAmendSubmit(ev) {
     patch.was_price = freshMatch.buys[0].price;
 
     const displayName = patch.name || freshMatch.name || freshMatch.code;
-    const url = issueUrl("AMEND " + displayName, patch);
-    if (pending) {
-      pending.location.href = url;
-    } else {
-      const win = window.open(url, "_blank", "noopener");
-      if (!win) location.href = url;
-    }
-    redirected = true;
+    const title = "AMEND " + displayName;
 
-    // 점 7 — 사용자는 이슈만 새 탭에서 열었을 뿐 표는 아직 이전 값이다.
-    // 워크플로가 반영할 때까지 몇 분 걸릴 수 있는데 화면이 아무 말도 안
-    // 하면 "눌렀는데 왜 안 바뀌지"로 이어진다. 정직하게 남긴다.
-    addStaleMessage("방금 고치기 이슈를 새 탭에서 열었습니다 — 깃허브에서 제출을 완료하면 반영에 몇 분 "
-      + "걸릴 수 있습니다. 이 표는 아직 이전 값을 보여주고 있으니, 나중에 새로고침해서 확인해주세요.");
+    // 여기부터는 pending 탭의 운명(닫힘/깃허브로 리다이렉트/그대로 둠)을
+    // writeRecord() 가 정한다 — 아래 finally 는 더 이상 이 탭을 건드리지
+    // 않는다(handedOff = true).
+    handedOff = true;
+    const result = await writeRecord(patch, title, displayName, pending);
 
-    // 리뷰 부가 개선 1 — 성공 후에도 amend 모드가 그대로 남아 있으면, 폼도
-    // 그대로 남은 채 사용자가 실수로 다시 제출을 누르면 똑같은 이슈가
-    // 한 번 더 열린다(apply_amend 가 두 번째는 AlreadyApplied(rc=4)로
-    // 막긴 하지만, 열릴 필요 없는 이슈고 안내 배지도 중복으로 쌓인다).
-    // amend 는 끝났으니 명시적으로 나간다.
-    exitAmendMode();
+    // 점 7 — Worker 로 성공했든 깃허브 폴백으로 넘어갔든, 사용자가 보는
+    // 표는 둘 다 아직 이전 값이다(반영은 intake.yml 이 나중에 한다).
+    // writeRecord() 가 이미 그 안내(#stale 배지 또는 #result 폴백 문구)를
+    // 남겼으므로 여기서 다시 남기지 않는다.
+    //
+    // 리뷰 부가 개선 1 — 성공(또는 폴백으로라도 제출)했는데 amend 모드가
+    // 그대로 남아 있으면, 폼도 그대로 남은 채 사용자가 실수로 다시
+    // 제출을 누르면 똑같은 이슈가 한 번 더 열린다(apply_amend 가 두
+    // 번째는 AlreadyApplied(rc=4)로 막긴 하지만, 열릴 필요 없는 이슈고
+    // 안내 배지도 중복으로 쌓인다). result.ok(성공 또는 폴백 제출 완료)
+    // 일 때만 나간다 — "blocked"(예: 패스프레이즈 불일치)면 사용자가
+    // 아직 아무것도 못 냈으므로 폼을 그대로 둬 다시 시도하거나 #result
+    // 의 수동 링크를 쓸 수 있게 한다.
+    if (result.ok) exitAmendMode();
   } catch (e) {
     // 리뷰 I3 — 위 어디서 던지든(예상 못 한 형태의 JSON 등) 여기로 모여
     // pending 탭을 정리하고 사람이 읽을 오류를 알린다. reportFatal 은
     // 이미 있는 오류 경계(#stale 배지)를 그대로 재사용한다.
     reportFatal(e);
   } finally {
-    if (pending && !redirected) pending.close();
+    if (pending && !handedOff) pending.close();
   }
 }
 
@@ -1114,7 +1132,173 @@ function issueUrl(title, payload) {
               + "&body=" + encodeURIComponent(body);
 }
 
-function onSubmit(ev) {
+// ── Worker 쓰기 프록시 ───────────────────────────────────────────────────
+//
+// tryWorker() 는 절대 throw 하지 않는다 — 실패의 종류를 reason 문자열로
+// 돌려주고, 그걸 어떻게 다룰지(자동 폴백 vs 막고 수동 탈출구만)는 호출자
+// (writeRecord)가 결정한다. 종류를 구분하는 이유:
+//
+//   "not-configured"/"network" → **자동으로** 깃허브 폴백을 쓴다. Worker가
+//     아직 배포 전이거나(자리표시자), 배포됐어도 지금 못 닿는(Cloudflare
+//     장애, CSP 자리표시자 미교체, 오프라인 등) 상태는 "이 요청이 틀렸다"와
+//     무관한 가용성 문제라, 예전(Task 13)처럼 그냥 깃허브로 진행해도 안전
+//     하다 — 어차피 그 경로도 페이지 커튼을 통과했고 깃허브 로그인은
+//     소유자만 되므로 인증이 약해지는 게 아니다.
+//   "auth" → 패스프레이즈가 Worker 의 GATE_PASS 와 다르다. **자동으로
+//     넘기지 않는다.** 이 페이지는 커튼을 통과한 그 문구를 그대로 보내므로,
+//     여기서 틀렸다는 건 배포 설정(GATE_PASS 와 GATE_PBKDF2_HEX 가 서로
+//     다른 문구에서 나왔음)이 어긋났다는 신호다 — 조용히 폴백으로
+//     넘어가면 그 어긋남을 사용자가 영영 모르고 지나칠 수 있다. 막되,
+//     수동으로 고를 수 있는 폴백 링크는 renderResult 가 보여준다(완전한
+//     막다른 길은 아니다).
+//   "http"/"bad-response" → Worker 는 응답했지만 뭔가 실패했다(깃허브 API
+//     오류, 예상과 다른 응답 모양 등). 이것도 자동 폴백하지 않는다 — 예를
+//     들어 깃허브 쪽 레이트리밋 같은 원인은 폴백(깃허브 이슈를 직접 여는
+//     것)도 똑같이 막힐 수 있어, 사용자가 이유를 보고 판단하게 한다.
+async function tryWorker(payload, display) {
+  if (!isWorkerConfigured()) return { ok: false, reason: "not-configured" };
+  const passphrase = getStoredPassphrase();
+  if (!passphrase) return { ok: false, reason: "not-configured" };   // 커튼 이론상 항상 있어야 하지만 방어적으로
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);   // 무한 대기 방지 — 10초면 정상 응답엔 충분하고도 남는다
+  let resp;
+  try {
+    resp = await fetch(WORKER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pass: passphrase, payload, display }),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    // fetch() 의 TypeError 는 DNS 실패·CORS 차단·CSP 차단(자리표시자
+    // 미교체 포함)·오프라인·타임아웃(AbortError 도 여기로 온다)을 전부
+    // 구분 없이 이 하나로 던진다 — 브라우저가 원래 그렇다. 전부 같은
+    // "network" 사유로 묶는다(어차피 사용자가 할 수 있는 다음 행동은
+    // 같다: 폴백으로 진행하거나 나중에 다시 시도).
+    return { ok: false, reason: "network" };
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (resp.status === 401) return { ok: false, reason: "auth" };
+  if (!resp.ok) return { ok: false, reason: "http", status: resp.status };
+
+  let data;
+  try {
+    data = await resp.json();
+  } catch (e) {
+    return { ok: false, reason: "bad-response" };
+  }
+  if (!data || typeof data.number !== "number" || typeof data.url !== "string") {
+    return { ok: false, reason: "bad-response" };
+  }
+  return { ok: true, number: data.number, url: data.url };
+}
+
+// #result 를 채운다 — textContent 전용(성공 시 링크 <a> 하나만 createElement
+// 로 별도 조립, href/textContent 둘 다 신뢰할 수 없는 문자열을 안전한
+// 방식으로만 채운다). 매 호출마다 완전히 새로 그린다(renderTable 과 같은
+// 패턴) — 이전 결과가 남아 있다가 새 제출 결과와 섞여 보이면 안 된다.
+function renderResult(info) {
+  const el = document.getElementById("result");
+  el.textContent = "";
+  el.className = "result " + info.kind;   // style.css: .result.success/.fallback/.blocked
+  el.hidden = false;
+
+  const REASON_MSG = {
+    "not-configured": "Worker 가 아직 설정되지 않았습니다",
+    network: "Worker 에 연결하지 못했습니다",
+    auth: "패스프레이즈가 Worker 설정과 일치하지 않습니다 — 배포 시 넣은 GATE_PASS 를 확인해주세요",
+    http: "Worker 가 요청을 거부했습니다" + (info.status ? " (HTTP " + info.status + ")" : ""),
+    "bad-response": "Worker 응답을 이해할 수 없습니다",
+  };
+
+  if (info.kind === "success") {
+    const p = document.createElement("p");
+    p.textContent = "저장 요청을 보냈습니다 — 이슈 #" + info.number + ".";
+    el.appendChild(p);
+    const a = document.createElement("a");
+    a.href = info.url;                  // Worker/깃허브 API 가 돌려준 값 — 사용자 입력이 아니다
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.textContent = "이슈 보기";
+    el.appendChild(a);
+  } else if (info.kind === "fallback") {
+    const p = document.createElement("p");
+    p.textContent = (REASON_MSG[info.reason] || "저장에 실패했습니다")
+      + " — 대신 깃허브 이슈 화면을 새 탭으로 열었습니다. 그 탭에서 Submit 을 눌러야 반영됩니다.";
+    el.appendChild(p);
+  } else {   // "blocked" — 자동으로 넘기지 않고 수동 탈출구만 준다
+    const p = document.createElement("p");
+    p.textContent = (REASON_MSG[info.reason] || "저장에 실패했습니다") + " — 아직 반영되지 않았습니다.";
+    el.appendChild(p);
+    const a = document.createElement("a");
+    a.href = issueUrl(info.title, info.payload);
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.textContent = "그래도 깃허브에서 직접 열기";
+    el.appendChild(a);
+  }
+}
+
+// buy/sell(onSubmit)과 amend(onAmendSubmit) 제출 경로가 공유하는 마지막
+// 단계 — Worker 를 먼저 시도하고, 그 결과에 따라 자동 폴백/수동 탈출구/
+// 성공 표시 중 하나로 마무리한다.
+//
+// `pending` (선택) — amend 는 이 함수를 부르기 **전에** 이미 재조회
+// (positions.json no-store)를 기다려야 해서, 그 재조회가 시작되기 전에
+// 자신이 직접 빈 탭을 열어 사용자 제스처를 붙잡아 둔다(팝업 차단 대응,
+// onAmendSubmit 옆 주석 참조) — 그 탭을 그대로 넘겨받아 재사용한다. buy/
+// sell 은 이 함수를 제출 핸들러에서 await 없이 곧장 부르므로(핸들러 진입
+// 시점에 아직 제스처가 살아있다) 이 함수 자신의 맨 앞(첫 await 이전)에서
+// 새로 연다 — 여기서 여는 것도 fetch() 호출보다 먼저이기만 하면 같은
+// 이유로 안전하다.
+async function writeRecord(payload, title, display, pending) {
+  if (pending === undefined) pending = window.open("", "_blank");
+  let tabUsed = false;
+  try {
+    const outcome = await tryWorker(payload, display);
+    if (outcome.ok) {
+      if (pending) pending.close();
+      renderResult({ kind: "success", number: outcome.number, url: outcome.url });
+      addStaleMessage("방금 Worker로 저장을 요청했습니다(이슈 #" + outcome.number + ") — 워크플로가 "
+        + "반영할 때까지 몇 분 걸릴 수 있습니다. 이 표는 아직 이전 값을 보여주고 있으니, 나중에 "
+        + "새로고침해서 확인해주세요.");
+      return { ok: true };
+    }
+    if (outcome.reason === "not-configured" || outcome.reason === "network") {
+      const url = issueUrl(title, payload);
+      if (pending) {
+        pending.location.href = url;
+        tabUsed = true;
+      } else {
+        const win = window.open(url, "_blank", "noopener");
+        tabUsed = true;
+        if (!win) location.href = url;
+      }
+      renderResult({ kind: "fallback", reason: outcome.reason });
+      return { ok: true, fallback: true };
+    }
+    // "auth"/"http"/"bad-response" — 자동으로 넘기지 않는다(tryWorker 옆
+    // 주석 참조). pending 탭은 안 썼으니 finally 에서 닫는다.
+    renderResult({ kind: "blocked", reason: outcome.reason, status: outcome.status, title, payload });
+    return { ok: false };
+  } finally {
+    if (pending && !tabUsed) pending.close();
+  }
+}
+
+// Worker 연동(이 작업) 전에는 이 함수가 완전히 동기였다 — issueUrl() 을
+// 만들어 window.open() 한 줄로 끝났다. writeRecord() 가 await 하는
+// tryWorker() 를 거치므로 이제 async 다. 그래도 팝업 차단 대응은 예전과
+// 같은 요령을 그대로 쓴다 — 이 핸들러가 아직 동기로 실행되는 지금(제출
+// 이벤트 직후, 첫 await 이전) writeRecord() 를 부르면, writeRecord() 내부의
+// `window.open("", "_blank")` 도 같은 동기 구간 안에서 실행돼(async 함수는
+// 첫 await 을 만나기 전까지 호출자와 같은 태스크에서 그대로 실행된다)
+// 사용자 제스처가 아직 살아있다 — confirm() 이 끼어들어도 마찬가지다(같은
+// 이유로 이전 코드가 이미 의존하던 성질).
+async function onSubmit(ev) {
   ev.preventDefault();
   const text = document.getElementById("q").value;
   const code = resolveCode(text);
@@ -1139,23 +1323,15 @@ function onSubmit(ev) {
                  + "% 차이입니다. 그대로 진행할까요?")) return;
   }
 
+  const name = NAMES.get(code) || code;
   const payload = open
     ? { op: "sell", code, price, date, reason: document.getElementById("memo").value }
-    : { op: "buy", code, name: NAMES.get(code) || code, price, date,
+    : { op: "buy", code, name, price, date,
         source: document.getElementById("source").value,
         memo: document.getElementById("memo").value };
-  const url = issueUrl((open ? "SELL " : "BUY ") + (NAMES.get(code) || code), payload);
+  const title = (open ? "SELL " : "BUY ") + name;
 
-  // 새 탭으로 연다 — 트래커 화면은 그대로 두고 이슈만 따로 제출한 뒤
-  // 돌아와 다음 기록을 이어 넣을 수 있게. 항목 11 — 팝업이 막히면
-  // (모바일 인앱 브라우저 등) window.open 이 null 을 돌려준다. 그때는
-  // 조용히 아무 일도 안 일어나는 대신 현재 탭에서 이동한다 — 버튼을
-  // 눌렀는데 반응이 없어 보이는 것보다 낫다. 제출 핸들러 안에서 동기적
-  // 으로만 호출하므로(중간에 await 없음) 사용자 제스처가 살아있어
-  // 팝업 차단을 안 타는 게 보통이다 — confirm() 이 끼어드는 경우에도
-  // 같은 태스크 안에서 동기 실행이라 활성화 상태가 유지된다.
-  const win = window.open(url, "_blank", "noopener");
-  if (!win) location.href = url;
+  await writeRecord(payload, title, name);
 }
 
 document.getElementById("q").addEventListener("input", e => {
@@ -1263,7 +1439,7 @@ async function main() {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// 통과 커튼 (passphrase curtain) — 이건 잠금이 아니다
+// 통과 커튼 (passphrase curtain) — 이건 잠금이 아니다, 그리고 이제 겸직이다
 // ══════════════════════════════════════════════════════════════════════
 //
 // positions.json 은 인증 없이 누구나 받을 수 있다(실측 2026-08-20):
@@ -1278,67 +1454,164 @@ async function main() {
 // 낸다. 이 파일을 읽는 미래의 누군가(자신 포함)가 이걸 진짜 접근 통제로
 // 착각해 그 위에 뭔가를 쌓으면 안 되기 때문이다.
 //
-// 그래서 여기 거는 것도 "토큰"이 아니라 "통과했다는 사실 하나"뿐이다.
+// **Worker 연동(이 작업) 전에는** 여기 거는 것도 "토큰"이 아니라 "통과
+// 했다는 사실 하나"(불리언)뿐이었다. 이제는 다르다 — 같은 문구가 Worker
+// 쓰기 요청의 인증에도 쓰이므로, 평문 문구 자체를 들고 있어야 한다(아래
+// getStoredPassphrase 옆 주석). 이 절 전체가 그 변화를 어떻게 감당했는지
+// 설명한다.
+//
+// ── 왜 SHA-256 한 번이 아니라 PBKDF2인가 ─────────────────────────────
+// GATE_PBKDF2_HEX 는 페이지 소스에 그대로 공개된다(누구나 뷰소스로 본다).
+// 이 값이 "통과 여부만 가르는 커튼용 해시"였을 때는 오프라인 대입 공격의
+// 결과물이 기껏해야 "커튼을 넘길 수 있다"였다 — 그런데 §9 가 브라우저에
+// 토큰을 안 두는 이유와 정확히 같은 논리로, 이제 이 문구는 **쓰기 자격
+// 증명**이기도 하다. 바른 SHA-256 은 범용 GPU 로 초당 수십억 회를 돌릴 수
+// 있어(해시 하나 계산이 마이크로초 단위), 평범한 길이의 문구는 오프라인
+// 사전 대입에 사실상 무방비다. PBKDF2-HMAC-SHA256 을 반복 600,000 회로
+// 걸면 계산 하나에 들이는 비용이 SHA-256 한 번의 60만 배가 되어, 같은
+// 사전 대입에 필요한 총 시간이 그만큼 늘어난다 — 페이지 소스가 통째로
+// 공개인 이상 "못 뚫는다"가 아니라 "뚫는 데 훨씬 오래 걸린다"는 뜻이다
+// (OWASP 2023 PBKDF2-HMAC-SHA256 권장 반복수와 같은 자리 — 서버 인증
+// 시스템 기준이지만 여기서도 같은 하한을 그대로 따른다). 소금(salt,
+// 아래 GATE_PBKDF2_SALT)은 여기서 비밀이 아니다 — 이것도 페이지 소스에
+// 있다. 소금의 역할은 "이 사이트 전용으로 미리 계산해둔 표(레인보우
+// 테이블)를 못 재사용하게" 하는 것뿐, 이 페이지를 노리고 새로 도는
+// 공격의 반복당 비용은 못 낮춘다 — 진짜 방어선은 반복수와 사용자가 고른
+// 문구의 길이/무작위성이다.
+//
+// 반복수 600,000 을 고른 근거(실측, 이 저장소 개발 PC, 데스크톱급
+// WebCrypto): 100,000회 25.5ms, 300,000회 75.5ms, 600,000회 159.9ms,
+// 1,000,000회 267.3ms — 반복수에 선형으로 비례한다. WebCrypto의 PBKDF2
+// 는 브라우저 네이티브 구현이라(JS 루프가 아니다) 휴대폰에서도 자릿수가
+// 크게 달라지진 않는다고 보고, 저사양 휴대폰이 데스크톱보다 5~10배
+// 느리다고 넉넉히 잡아도 600,000회는 1~1.5초 안팎으로 예상한다 — 매일
+// 여는 화면에서 한 번(로그인 유지되는 한 다시 안 묻는다, 아래
+// getStoredPassphrase) 감수할 수 있는 지연이라고 판단했다. 실제 휴대폰
+// 실측치는 아니다 — 배포 후 너무 느리면 이 상수 하나만 낮추면 된다(다만
+// 낮추면 위 대입 공격 여유 시간이 그만큼 줄어든다는 트레이드오프가
+// 그대로 따라온다).
+//
+// ── 유출 시 무슨 일이 생기나 (localStorage 겸용 저장의 트레이드오프) ──
 // §9 가 브라우저에 깃허브 토큰을 두지 않는 이유 — localStorage 는 경로가
 // 아니라 오리진 단위라 amid815.github.io 아래 mouigosa·황룡·눌림베팅·
 // 종가베팅·테마탐색구조대·오디세이가 같은 버킷을 쓴다 — 가 여기도 똑같이
-// 적용된다. 다른 점은 유출됐을 때의 결과다: 토큰이 새면 그 오리진 전체에
-// 쓰기 권한이 뚫린다(§9). 이 플래그(GATE_STORAGE_KEY)가 새면 — 새봐야
-// "통과했다"는 불리언 하나다 — 아무 권한도 안 생기고, 기껏해야 그
-// 브라우저 하나에서 "지나가는 사람 막기"라는 원래 목적을 잃을 뿐이다.
-// 그 비대칭이 여기 저장해도 되는 값과 §9 가 저장하면 안 된다고 한 값의
-// 경계선이다.
+// 적용된다. 다른 점은 유출됐을 때의 결과다:
+//   - §9 가 막은 것(Contents:write 토큰)이 새면: main 브랜치의 app.js 를
+//     통째로 갈아치울 수 있다 → Pages 재배포 → 그 오리진 전체(다른 네
+//     대시보드 포함)에 임의 스크립트를 심을 수 있다. 토큰을 지워도
+//     이미 커밋된 코드는 계속 서빙된다 — 사실상 영구적이고 전면적인
+//     피해다.
+//   - 이 값(패스프레이즈 평문)이 새면: 할 수 있는 일은 Worker 에 POST
+//     해서 **이슈를 여는 것뿐**이다(GH_TOKEN 은 Worker 안에만 있고
+//     Issues 권한만 있다, worker/worker.js 상단 주석). 이슈가 반영되면
+//     positions.json 에 가짜 매수/매도/고치기 기록이 하나 늘거나
+//     바뀐다 — 성가시지만 "고치기"(amend)로 되돌릴 수 있고, 최악의
+//     경우도 이슈 이력과 git 커밋 이력(§4 "이슈가 남기는 것" — 처리된
+//     이슈는 닫히되 지우지 않는다)에 그대로 남아 무엇이 언제 바뀌었는지
+//     추적할 수 있다. 코드를 한 글자도 못 건드리고, 다른 대시보드에는
+//     전혀 닿지 않는다.
+// 이 비대칭(코드 장악 대 기록 오염, 후자는 감사로그가 있어 복구 가능)이
+// "여기 평문을 저장해도 되는가"에 대한 답이다 — 안전해서가 아니라,
+// §9 가 절대 안 된다고 한 피해와 종류가 다르고 훨씬 작기 때문이다.
+//
+// ── 어디에 저장하나 ──────────────────────────────────────────────────
+// localStorage 를 골랐다(sessionStorage 나 메모리 변수가 아니라). 이
+// 페이지는 "매일 휴대폰에서 열어보는" 것이 전제(요구사항, 기존 커튼
+// 설계도 같은 이유로 불리언을 영구 저장했다) — sessionStorage 는 탭을
+// 닫으면(모바일에서는 앱을 완전히 종료하면) 사라져 사실상 방문마다 다시
+// 문구를 치게 되고, 그건 이 화면을 안 쓰게 만드는 마찰이다(위 §7 요구와
+// 정면으로 부딪힌다). 메모리 변수는 새로고침마다 사라져 더 나쁘다.
+// localStorage 의 대가는 위에서 이미 재본 유출 위험뿐이고, 그 위험은
+// 감수할 만하다고 판단했다.
 
-// 사용자가 고른 문구를 여기서 직접 볼 일이 없다 — 해시만 붙여넣는다.
-// 아래는 자리표시자다. 실제 값은 아래 명령으로 로컬에서 계산해 붙여넣을
-// 것(이 세션의 보고서에도 같은 명령을 남겼다):
+// 사용자가 고른 문구를 여기서 직접 볼 일이 없다 — PBKDF2 파생값(해시)만
+// 붙여넣는다. 아래는 자리표시자다. 실제 값은 아래 명령으로 로컬에서
+// 계산해 붙여넣을 것(이 작업의 보고서에도 같은 명령을 남겼다):
 //
 //   python -c "import hashlib, unicodedata, getpass; \
 //   p = unicodedata.normalize('NFC', getpass.getpass('passphrase: ').strip()); \
-//   print(hashlib.sha256(p.encode('utf-8')).hexdigest())"
+//   salt = b'mouigosa-gate-salt-v1'; \
+//   dk = hashlib.pbkdf2_hmac('sha256', p.encode('utf-8'), salt, 600000, dklen=32); \
+//   print(dk.hex())"
 //
-// trim → NFC 정규화 → UTF-8 인코딩 → SHA-256 순서가 아래 sha256Hex()/
-// normalizePassphrase() 와 정확히 같아야 한다 — 한글은 입력 경로(IME·
-// 붙여넣기 소스)에 따라 NFC/NFD 로 다르게 들어올 수 있어(자모 결합 여부),
-// 정규화를 양쪽에서 맞추지 않으면 눈에는 같은 문구인데 해시가 달라진다.
-const GATE_HASH_HEX = "REPLACE_WITH_YOUR_SHA256_HEX";
+// trim → NFC 정규화 → UTF-8 인코딩 → PBKDF2-HMAC-SHA256(salt, 600000회,
+// 32바이트) 순서가 아래 pbkdf2Hex()/normalizePassphrase() 와 정확히
+// 같아야 한다 — 한글은 입력 경로(IME·붙여넣기 소스)에 따라 NFC/NFD 로
+// 다르게 들어올 수 있어(자모 결합 여부), 정규화를 양쪽에서 맞추지 않으면
+// 눈에는 같은 문구인데 해시가 달라진다. (실제로 Python hashlib.pbkdf2_hmac
+// 과 WebCrypto SubtleCrypto.deriveBits({name:"PBKDF2",...}) 가 같은 값을
+// 내는지 이 작업에서 교차 검증했다 — 같은 문구·소금·반복수로 두 쪽
+// 모두 27c44761...449635 로 일치했다.)
+const GATE_PBKDF2_HEX = "REPLACE_WITH_YOUR_PBKDF2_HEX";
+
+// 공개 상수 — 비밀이 아니다(위 "왜 PBKDF2인가" 참조). 문구를 바꾸지 않는
+// 한 이 소금과 반복수는 그대로 둔다 — 바꾸면 같은 문구도 다른 해시가
+// 나와 GATE_PBKDF2_HEX 를 다시 계산해야 한다.
+const GATE_PBKDF2_SALT = new TextEncoder().encode("mouigosa-gate-salt-v1");
+const GATE_PBKDF2_ITERATIONS = 600000;
 
 // 오리진 공유 버킷에서 다른 대시보드 키와 안 겹치게 접두어를 둔다(위
-// 설명 참조). "_v1" — 나중에 커튼 방식을 바꾸면(예: 문구 자체를 바꾸는
-// 대신 판정 로직을 바꾸는 경우) 옛 기기의 낡은 통과 기록을 새 로직으로
-// 오판하지 않도록 버전을 올릴 수 있게 남겨둔다.
-const GATE_STORAGE_KEY = "mouigosa_gate_ok_v1";
+// 설명 참조). "_v2" — 이 저장소는 아직 push 되지 않은 로컬 커밋
+// (d2bc65d)에서 "_v1"로 불리언("1")만 저장했었다. 이 작업이 그 커밋을
+// 아직 아무도 안 받은 상태에서 고쳐 저장 형태를 불리언에서 평문
+// 패스프레이즈로 바꾸므로, 실사용 기기가 옛 "_v1" 형태를 들고 있을 일이
+// 없다(배포된 적이 없다) — 그래도 의미 자체가 달라졌으니(불리언 →
+// 자격증명) 버전을 올려 혹시 모를 혼선을 원천 차단한다.
+const GATE_STORAGE_KEY = "mouigosa_gate_pass_v2";
 
 function normalizePassphrase(raw) {
   // trim 먼저, NFC 정규화 나중 — 위 python 명령과 순서를 맞춘다(순서
   // 자체가 결과를 바꾸는 입력은 실무에서 없다고 보지만, 두 코드가 서로
-  // 다른 순서를 따를 이유가 없다).
+  // 다른 순서를 따를 이유가 없다). Worker 로 보낼 때도 이 정규화를 거친
+  // 값을 보낸다 — worker.js 도 같은 순서(trim→NFC)로 한 번 더 정규화해
+  // 비교하므로 어느 한쪽만 정규화를 빼먹어도 안전하지만, 두 코드가 다른
+  // 규칙을 따를 이유가 없다는 원칙은 여기도 같다.
   return raw.trim().normalize("NFC");
 }
 
-async function sha256Hex(text) {
-  const bytes = new TextEncoder().encode(text);   // UTF-8
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, "0")).join("");
+async function pbkdf2Hex(passphrase) {
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw", enc.encode(passphrase), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: GATE_PBKDF2_SALT, iterations: GATE_PBKDF2_ITERATIONS, hash: "SHA-256" },
+    keyMaterial, 256);
+  return Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-function isGateOpen() {
+// 저장된 패스프레이즈(평문) — 있으면 이 기기가 이미 커튼을 통과했다는
+// 뜻이자, Worker POST 에 실어 보낼 값이다(writeRecord → tryWorker). 예전
+// (Worker 연동 전) isGateOpen() 은 "1"이라는 불리언만 봤지만, 이제는
+// "통과했는가"와 "쓰기 요청에 실을 값이 있는가"가 같은 질문이 됐다 —
+// 그래서 반환값 자체를 재사용한다(따로 boolean getter 를 안 둔다 — 두
+// 갈래로 나누면 언젠가 어긋난다: 예를 들어 플래그는 있는데 값이 지워진
+// 상태가 생기면 커튼은 열려 있는데 Worker 요청마다 인증이 조용히
+// 실패하는, 원인 찾기 어려운 상태가 된다).
+function getStoredPassphrase() {
   try {
-    return localStorage.getItem(GATE_STORAGE_KEY) === "1";
+    return localStorage.getItem(GATE_STORAGE_KEY) || "";
   } catch (e) {
     // localStorage 자체가 막힌 드문 환경(일부 사생활 보호 모드, 저장소
     // 정책 등) — 매번 다시 묻는 정도로 낮춰 대응한다. 페이지가 아예 못
     // 뜨는 것보다 낫다.
-    return false;
+    return "";
   }
 }
 
-function setGateOpen() {
+function isGateOpen() {
+  return getStoredPassphrase() !== "";
+}
+
+function setStoredPassphrase(passphrase) {
   try {
-    localStorage.setItem(GATE_STORAGE_KEY, "1");
+    localStorage.setItem(GATE_STORAGE_KEY, passphrase);
   } catch (e) {
     // 저장 실패(용량 초과 등)해도 이번 세션은 이미 통과했으니 계속
     // 진행한다 — 다음 방문에 다시 물어볼 뿐, 이번 방문이 막히면 안 된다.
+    // (이번 세션 안에서는 handleGateSubmit 의 지역변수 passphrase 가
+    // 아니라 이 함수를 다시 거쳐야만 Worker 요청이 인증되므로, 저장이
+    // 실패한 세션에서 Worker 쓰기를 시도하면 매번 401 로 막힌다 — 그래도
+    // "페이지가 아예 안 뜨는 것"보다는 낫다는 판단은 예전 코드와 같다.)
   }
 }
 
@@ -1391,9 +1664,11 @@ async function handleGateSubmit(ev) {
   gateBusy = true;
   submitBtn.disabled = true;
   try {
-    const hex = await sha256Hex(passphrase);
-    if (hex === GATE_HASH_HEX) {
-      setGateOpen();
+    const hex = await pbkdf2Hex(passphrase);   // 600,000회 반복 — 위 절 설명 참조, 이 한 번만 비용을 낸다
+    if (hex === GATE_PBKDF2_HEX) {
+      // 평문을 저장한다(불리언이 아니다) — Worker 쓰기 요청에 이 값을
+      // 그대로 실어 보내야 해서다(getStoredPassphrase/writeRecord 참조).
+      setStoredPassphrase(passphrase);
       unlockAndStart();
     } else {
       errorEl.textContent = "코드가 일치하지 않습니다.";
@@ -1416,15 +1691,20 @@ document.getElementById("gate-form").addEventListener("submit", handleGateSubmit
 // 이 기기에서 이미 통과했으면 다시 묻지 않는다 — 매일 휴대폰에서 열어보는
 // 화면에 매번 커튼을 치면 그 자체로 못 쓰게 된다(요구사항).
 //
-// 되돌아오는 길: 문구를 잊어도 잃는 건 없다 — 데이터는 여전히
-// raw.githubusercontent.com 에 그대로 있다(위 설명). 페이지 자체에
-// 다시 들어가고 싶으면 저장소 소유자가 새 문구를 고르고 그 해시로
-// GATE_HASH_HEX 를 바꿔 커밋하면 된다. 단, isGateOpen() 은 해시가 아니라
-// GATE_STORAGE_KEY 의 "통과했었다"는 사실만 본다 — 이미 통과해 둔
-// 기기는 해시가 바뀐 뒤에도 계속 안 물어본다(그 기기는 이미 들어와
-// 있으니 문제가 아니다). "이번엔 모든 기기가 다시 확인하게 하고 싶다"
-// 처럼 그 반대가 필요해지면 GATE_STORAGE_KEY 의 "_v1"을 "_v2"로 올린다 —
-// 옛 기기가 들고 있는 키와 안 겹치는 새 키가 되어 전부 다시 묻는다.
+// 되돌아오는 길: 문구를 잊어도 페이지 조회 자체는 잃는 게 없다 — 데이터는
+// 여전히 raw.githubusercontent.com 에 그대로 있다(위 설명). 페이지 자체에
+// 다시 들어가고 싶으면 저장소 소유자가 새 문구를 고르고 그 PBKDF2 값으로
+// GATE_PBKDF2_HEX 를 바꿔 커밋하면 된다(이때 Worker 의 GATE_PASS 시크릿도
+// 같은 새 문구로 같이 바꿔야 한다 — worker/README.md 3단계 — 안 그러면
+// 새 문구로 커튼은 통과되는데 Worker 쓰기는 401 로 막히는 어긋난 상태가
+// 된다). 단, isGateOpen() 은 GATE_PBKDF2_HEX 가 아니라 GATE_STORAGE_KEY 에
+// 저장된 값이 있는지만 본다 — 이미 통과해 둔 기기는 해시가 바뀐 뒤에도
+// 계속 안 물어본다(그 기기는 이미 들어와 있으니 문제가 아니다. 다만 그
+// 기기가 들고 있는 옛 평문으로 Worker 에 쓰려 하면, GATE_PASS 도 같이
+// 바뀌었을 경우 401 로 거부된다 — #result 가 그 상태를 그대로 보여준다).
+// "이번엔 모든 기기가 다시 확인하게 하고 싶다"처럼 그 반대가 필요해지면
+// GATE_STORAGE_KEY 의 "_v2"를 "_v3"으로 올린다 — 옛 기기가 들고 있는
+// 키와 안 겹치는 새 키가 되어 전부 다시 묻는다.
 if (isGateOpen()) {
   unlockAndStart();
 }

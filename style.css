@@ -1,6 +1,6 @@
-:root { --bg:#fff; --fg:#222; --line:#ddd; --up:#c0392b; --down:#2471a3; --dim:#888; }
+:root { --bg:#fff; --fg:#222; --line:#ddd; --up:#c0392b; --down:#2471a3; --dim:#888; --ok:#1e7e34; }
 @media (prefers-color-scheme: dark) {
-  :root { --bg:#16181c; --fg:#e6e6e6; --line:#333; --up:#e74c3c; --down:#5dade2; --dim:#999; }
+  :root { --bg:#16181c; --fg:#e6e6e6; --line:#333; --up:#e74c3c; --down:#5dade2; --dim:#999; --ok:#2ecc71; }
 }
 body { background:var(--bg); color:var(--fg); font-family:system-ui,"Malgun Gothic",sans-serif;
        margin:0; padding:16px; max-width:900px; margin-inline:auto; }
@@ -47,6 +47,16 @@ input, select, button { padding:8px; font-size:1rem; background:var(--bg);
                         color:var(--fg); border:1px solid var(--line); border-radius:4px; }
 button { cursor:pointer; }
 .hint { color:var(--dim); font-size:.85rem; }
+/* #result — 제출 결과(성공/폴백/막힘, app.js renderResult()). .stale/.mode 와
+   같은 "색 배지 + 흰 글씨" 패턴을 그대로 따른다 — 화면에 새 시각 언어를
+   더하지 않는다. */
+.result { padding:6px 10px; border-radius:4px; font-size:.85rem; margin:8px 0; }
+.result p { margin:0 0 4px; }
+.result p:last-child { margin-bottom:0; }
+.result.success { background:var(--ok); color:#fff; }
+.result.fallback { background:var(--dim); color:#fff; }
+.result.blocked { background:var(--up); color:#fff; }
+.result a { color:#fff; }
 @media (max-width:600px) { .field, input, select, button { width:100%; } }
 
 /* 통과 커튼(#gate, index.html/app.js 주석 참조) — 잠금이 아니라 커튼이다.

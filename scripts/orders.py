@@ -33,3 +33,34 @@ def plan(first_price: int) -> dict:
         "buy2": round(first_price * BUY2_RATIO),
         "buy3": round(first_price * BUY3_RATIO),
     }
+
+
+def average(prices: list) -> int:
+    """체결된 매수가들의 평균. 설계 §3 확정: 동일 수량 가정 = 산술평균.
+
+    수량을 기록하지 않기로 했으므로(포트폴리오 규모 노출 방지) 평균가는
+    가정에서 나온다. 나중에 "매번 같은 금액"(조화평균)으로 바꿀 수 있는데,
+    그때 **과거 기록의 평균가가 소급해서 바뀌면 안 된다** — 이미 그 평균가로
+    익절·손절이 체결된 기록들이라 계산식이 바뀌면 과거 체결이 소급 무효가
+    된다. 그래서 체결 기록에 그 시점의 방식(`weighting`)을 함께 저장한다
+    (models.apply_fills 참조).
+    """
+    if not prices:
+        raise ValueError("체결된 매수가 없다")
+    return round(sum(prices) / len(prices))
+
+
+def take_profit(prices: list) -> int:
+    """익절선. 평균가 기준이라 물타기하면 내려온다 — 그게 물타기의 목적이다."""
+    return round(average(prices) * TAKE_PROFIT_RATIO)
+
+
+def stop_loss(prices: list):
+    """손절선. **3차 체결 후에만** 존재한다(설계 §2). 그 전에는 None.
+
+    3차까지 안 간 종목은 손절 경로가 없어 영원히 열려 있을 수 있다 —
+    설계 §11 이 명시한 한계이고, 통계 화면이 미결 건수를 드러내야 한다.
+    """
+    if len(prices) < 3:
+        return None
+    return round(average(prices) * STOP_LOSS_RATIO)

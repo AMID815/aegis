@@ -48,3 +48,14 @@ input, select, button { padding:8px; font-size:1rem; background:var(--bg);
 button { cursor:pointer; }
 .hint { color:var(--dim); font-size:.85rem; }
 @media (max-width:600px) { .field, input, select, button { width:100%; } }
+
+/* 통과 커튼(#gate, index.html/app.js 주석 참조) — 잠금이 아니라 커튼이다.
+   레이아웃은 세로 단일 폼일 뿐, 그 이상 강조하지 않는다 — 커튼 화면이
+   너무 "보안 화면"처럼 요란하면 그 자체가 뭔가 지킬 게 있다는 신호가
+   되는데, 정작 지키는 게 아니라서(§9 와 같은 성격의 사실) 화면 톤도
+   낮춘다. */
+.gate { max-width:280px; margin:20vh auto 0; text-align:center; }
+.gate h1 { font-size:1.3rem; margin:0 0 16px; }
+#gate-form { display:flex; flex-direction:column; gap:10px; }
+.gate .field { text-align:left; }
+.gate-error { color:var(--up); font-size:.85rem; margin:0; }

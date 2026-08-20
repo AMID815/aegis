@@ -1172,7 +1172,14 @@ document.getElementById("cancel-btn").addEventListener("click", exitAmendMode);
 document.getElementById("open").addEventListener("click", onAmendButtonClick);
 document.getElementById("closed").addEventListener("click", onAmendButtonClick);
 
-(async function main() {
+// main() 은 더 이상 이 자리에서 즉시 실행되지 않는다 — 통과 커튼(맨 아래
+// 절)이 통과된 뒤에만(이미 통과해 있었으면 로드 즉시, 아니면 #gate-form
+// 제출 성공 시) 호출한다. positions.json/quotes.json/master.json 요청이
+// 전부 이 함수 안에서만 일어나므로, 이렇게 미루는 것 자체가 "커튼을
+// 통과하기 전엔 데이터를 받지 않는다"는 요구를 만족시키는 전부다 — 커튼이
+// 뭔가를 막아서가 아니라(URL 은 여전히 공개다), 통과 전에 데이터를 받는
+// 게 애초에 이 화면에서 할 일이 없어서다.
+async function main() {
   // KST 기준 "오늘" 문자열 — master.json 캐시버스터(하루 한 번만 바뀌면
   // 됨)와 매입일 기본값(아래) 둘 다에 쓴다. 기기 로캘에 기대지 않고
   // UTC+9 를 명시적으로 더한다 — 파이썬 쪽 KST = timezone(timedelta(hours=9))
@@ -1253,4 +1260,171 @@ document.getElementById("closed").addEventListener("click", onAmendButtonClick);
   // 남겨 이 조건이 한눈에 보이게 한다.
   fillCandidates(document.getElementById("q").value);
   if (!amendTarget) updateMode();
-})().catch(reportFatal);   // 항목 13, F1 — 위 개별 try 가 못 잡는 나머지 전부
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// 통과 커튼 (passphrase curtain) — 이건 잠금이 아니다
+// ══════════════════════════════════════════════════════════════════════
+//
+// positions.json 은 인증 없이 누구나 받을 수 있다(실측 2026-08-20):
+//   https://raw.githubusercontent.com/AMID815/mouigosa/data/positions.json
+//   → HTTP 200, 인증 없음, 381바이트, 삼성전자/2026-08-19/247,500원/... 그대로.
+// GitHub Pages 를 진짜 비공개로 만들려면 Enterprise Cloud + 조직 계정이
+// 필요한데 여기엔 없다(설계 §9 와 같은 종류의 제약). 그래서 이 아래 코드가
+// 막는 건 "URL 을 아는 사람"이 아니라 "지나가다 이 페이지를 그냥 열어본
+// 사람" 뿐이다 — 사용자가 그 구분을 알고 이 형태를 골랐다
+// ("지나가는 사람만 막으면 될것같아"). 이 사실을 화면 문구에는 안 낸다
+// (내면 커튼의 대상에게 우회로를 알려주는 꼴이다) — 여기, 코드 주석에는
+// 낸다. 이 파일을 읽는 미래의 누군가(자신 포함)가 이걸 진짜 접근 통제로
+// 착각해 그 위에 뭔가를 쌓으면 안 되기 때문이다.
+//
+// 그래서 여기 거는 것도 "토큰"이 아니라 "통과했다는 사실 하나"뿐이다.
+// §9 가 브라우저에 깃허브 토큰을 두지 않는 이유 — localStorage 는 경로가
+// 아니라 오리진 단위라 amid815.github.io 아래 mouigosa·황룡·눌림베팅·
+// 종가베팅·테마탐색구조대·오디세이가 같은 버킷을 쓴다 — 가 여기도 똑같이
+// 적용된다. 다른 점은 유출됐을 때의 결과다: 토큰이 새면 그 오리진 전체에
+// 쓰기 권한이 뚫린다(§9). 이 플래그(GATE_STORAGE_KEY)가 새면 — 새봐야
+// "통과했다"는 불리언 하나다 — 아무 권한도 안 생기고, 기껏해야 그
+// 브라우저 하나에서 "지나가는 사람 막기"라는 원래 목적을 잃을 뿐이다.
+// 그 비대칭이 여기 저장해도 되는 값과 §9 가 저장하면 안 된다고 한 값의
+// 경계선이다.
+
+// 사용자가 고른 문구를 여기서 직접 볼 일이 없다 — 해시만 붙여넣는다.
+// 아래는 자리표시자다. 실제 값은 아래 명령으로 로컬에서 계산해 붙여넣을
+// 것(이 세션의 보고서에도 같은 명령을 남겼다):
+//
+//   python -c "import hashlib, unicodedata, getpass; \
+//   p = unicodedata.normalize('NFC', getpass.getpass('passphrase: ').strip()); \
+//   print(hashlib.sha256(p.encode('utf-8')).hexdigest())"
+//
+// trim → NFC 정규화 → UTF-8 인코딩 → SHA-256 순서가 아래 sha256Hex()/
+// normalizePassphrase() 와 정확히 같아야 한다 — 한글은 입력 경로(IME·
+// 붙여넣기 소스)에 따라 NFC/NFD 로 다르게 들어올 수 있어(자모 결합 여부),
+// 정규화를 양쪽에서 맞추지 않으면 눈에는 같은 문구인데 해시가 달라진다.
+const GATE_HASH_HEX = "REPLACE_WITH_YOUR_SHA256_HEX";
+
+// 오리진 공유 버킷에서 다른 대시보드 키와 안 겹치게 접두어를 둔다(위
+// 설명 참조). "_v1" — 나중에 커튼 방식을 바꾸면(예: 문구 자체를 바꾸는
+// 대신 판정 로직을 바꾸는 경우) 옛 기기의 낡은 통과 기록을 새 로직으로
+// 오판하지 않도록 버전을 올릴 수 있게 남겨둔다.
+const GATE_STORAGE_KEY = "mouigosa_gate_ok_v1";
+
+function normalizePassphrase(raw) {
+  // trim 먼저, NFC 정규화 나중 — 위 python 명령과 순서를 맞춘다(순서
+  // 자체가 결과를 바꾸는 입력은 실무에서 없다고 보지만, 두 코드가 서로
+  // 다른 순서를 따를 이유가 없다).
+  return raw.trim().normalize("NFC");
+}
+
+async function sha256Hex(text) {
+  const bytes = new TextEncoder().encode(text);   // UTF-8
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function isGateOpen() {
+  try {
+    return localStorage.getItem(GATE_STORAGE_KEY) === "1";
+  } catch (e) {
+    // localStorage 자체가 막힌 드문 환경(일부 사생활 보호 모드, 저장소
+    // 정책 등) — 매번 다시 묻는 정도로 낮춰 대응한다. 페이지가 아예 못
+    // 뜨는 것보다 낫다.
+    return false;
+  }
+}
+
+function setGateOpen() {
+  try {
+    localStorage.setItem(GATE_STORAGE_KEY, "1");
+  } catch (e) {
+    // 저장 실패(용량 초과 등)해도 이번 세션은 이미 통과했으니 계속
+    // 진행한다 — 다음 방문에 다시 물어볼 뿐, 이번 방문이 막히면 안 된다.
+  }
+}
+
+// #content 를 열면서 #q/#price/#date 의 required 도 같이 켠다(index.html
+// 위쪽 통과 커튼 주석 참조) — 정적으로 걸어두면 #content 가 숨어 있는
+// 동안 tests/test_index_html.py 의 "숨겨진 required" 가드에 걸린다.
+function revealContent() {
+  document.getElementById("content").hidden = false;
+  document.getElementById("q").required = true;
+  document.getElementById("price").required = true;
+  document.getElementById("date").required = true;
+}
+
+function unlockAndStart() {
+  document.getElementById("gate").hidden = true;
+  revealContent();
+  // main() 이 여기서만 불린다 — positions.json/quotes.json/master.json
+  // 요청은 전부 main() 안에 있으므로, 커튼을 통과한 뒤에만 이 줄에
+  // 닿는다는 사실 자체가 "통과 전엔 안 받는다"는 요구를 만족시킨다.
+  main().catch(reportFatal);   // 항목 13, F1 과 같은 오류 경계
+}
+
+let gateBusy = false;   // 해시 계산(await) 도중 중복 제출 방지
+
+async function handleGateSubmit(ev) {
+  ev.preventDefault();
+  if (gateBusy) return;
+
+  const input = document.getElementById("gate-pass");
+  const errorEl = document.getElementById("gate-error");
+  const submitBtn = document.getElementById("gate-submit");
+  errorEl.hidden = true;
+  errorEl.textContent = "";
+
+  // 이 페이지는 항상 HTTPS(또는 로컬 미리보기 — localhost 는 브라우저가
+  // secure context 로 취급한다)로 서빙되므로 crypto.subtle 은 정상적으로
+  // 있어야 한다. 그래도 없는 극단적 환경(구형 인앱 브라우저 등)에서
+  // 조용히 아무 반응이 없는 것보다는, 이유를 알리고 통과시키지 않는
+  // 편이 낫다 — 이 화면이 열리지 않아도 데이터 자체는 raw.githubusercontent.com
+  // 에 그대로 있다(위 설명과 같은 사실 — 다만 여기 문구에는 안 낸다).
+  if (typeof crypto === "undefined" || !crypto.subtle) {
+    errorEl.textContent = "이 브라우저에서는 확인 기능을 사용할 수 없습니다. 다른 브라우저로 시도해주세요.";
+    errorEl.hidden = false;
+    return;
+  }
+
+  const passphrase = normalizePassphrase(input.value);
+  if (!passphrase) return;   // #gate-pass 의 required 가 이미 막지만 방어적으로 한 번 더
+
+  gateBusy = true;
+  submitBtn.disabled = true;
+  try {
+    const hex = await sha256Hex(passphrase);
+    if (hex === GATE_HASH_HEX) {
+      setGateOpen();
+      unlockAndStart();
+    } else {
+      errorEl.textContent = "코드가 일치하지 않습니다.";
+      errorEl.hidden = false;
+      input.value = "";
+      input.focus();
+    }
+  } catch (e) {
+    reportFatal(e);
+    errorEl.textContent = "확인 중 오류가 발생했습니다. 다시 시도해주세요.";
+    errorEl.hidden = false;
+  } finally {
+    gateBusy = false;
+    submitBtn.disabled = false;
+  }
+}
+
+document.getElementById("gate-form").addEventListener("submit", handleGateSubmit);
+
+// 이 기기에서 이미 통과했으면 다시 묻지 않는다 — 매일 휴대폰에서 열어보는
+// 화면에 매번 커튼을 치면 그 자체로 못 쓰게 된다(요구사항).
+//
+// 되돌아오는 길: 문구를 잊어도 잃는 건 없다 — 데이터는 여전히
+// raw.githubusercontent.com 에 그대로 있다(위 설명). 페이지 자체에
+// 다시 들어가고 싶으면 저장소 소유자가 새 문구를 고르고 그 해시로
+// GATE_HASH_HEX 를 바꿔 커밋하면 된다. 단, isGateOpen() 은 해시가 아니라
+// GATE_STORAGE_KEY 의 "통과했었다"는 사실만 본다 — 이미 통과해 둔
+// 기기는 해시가 바뀐 뒤에도 계속 안 물어본다(그 기기는 이미 들어와
+// 있으니 문제가 아니다). "이번엔 모든 기기가 다시 확인하게 하고 싶다"
+// 처럼 그 반대가 필요해지면 GATE_STORAGE_KEY 의 "_v1"을 "_v2"로 올린다 —
+// 옛 기기가 들고 있는 키와 안 겹치는 새 키가 되어 전부 다시 묻는다.
+if (isGateOpen()) {
+  unlockAndStart();
+}

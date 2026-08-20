@@ -6,10 +6,49 @@
 <meta name="color-scheme" content="light dark">
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'self'; connect-src 'self' https://raw.githubusercontent.com; script-src 'self'; style-src 'self'">
+<!--
+  검색이 지나가는 사람이 이 페이지에 닿는 가장 흔한 경로다. noindex 는
+  값싸고, 아래 통과 커튼(#gate)보다 오히려 이 경로엔 더 실효적이다 —
+  검색엔진이 아예 안 걸어주면 그 사람은 이 URL 자체를 모른다.
+-->
+<meta name="robots" content="noindex, nofollow">
 <title>모의고사</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<!--
+  통과 커튼(passphrase curtain) — 잠금이 아니다. positions.json 은 인증
+  없이 누구나 raw.githubusercontent.com 에서 직접 받을 수 있다(실측
+  2026-08-20: 200, 인증 없음, 381바이트). 이 화면이 막는 건 "그 URL을
+  아는 사람"이 아니라 "지나가다 이 페이지를 그냥 열어본 사람"이다 —
+  사용자가 그 구분을 알고 선택했다. 이 문구 자체는 그 사실을 화면에
+  드러내지 않는다(드러내면 커튼의 대상인 바로 그 사람에게 우회로를
+  알려주는 셈이다) — 근거와 전체 설명은 app.js 의 통과 커튼 절과 이
+  작업의 보고서에 있다.
+
+  #content 는 여기서 정적으로 hidden 이다(app.js 가 나중에 켜는 게
+  아니라) — CSP 의 style-src 'self' 가 인라인 <style> 도 막아서, 첫
+  페인트 전에 숨기려면 static hidden + style.css 의 [hidden] 규칙뿐이다.
+  그래서 이 안의 #q/#price/#date 는 **정적** required 를 두지 않는다 —
+  숨은 조상 아래 정적 required 가 있으면 tests/test_index_html.py 의
+  "숨겨진 required" 가드(2026-08-20 실사고 재현 방지용)가 그대로 걸린다.
+  app.js 가 #content 를 열 때 이 세 필드의 required 도 같이 켠다(기존
+  setExitFieldsVisible() 이 exit 필드에 쓰던 것과 같은 패턴).
+-->
+<div id="gate" class="gate">
+  <h1>모의고사</h1>
+  <form id="gate-form" autocomplete="off">
+    <div class="field">
+      <label for="gate-pass">접근 코드</label>
+      <input id="gate-pass" type="password" autocomplete="off"
+             autocapitalize="off" autocorrect="off" spellcheck="false" required>
+    </div>
+    <button type="submit" id="gate-submit">확인</button>
+    <p id="gate-error" class="gate-error" role="alert" hidden></p>
+  </form>
+</div>
+
+<div id="content" hidden>
 <header>
   <h1>모의고사</h1>
   <div id="stale" class="stale" role="status" aria-live="polite" hidden></div>
@@ -85,8 +124,14 @@
   <form id="form" autocomplete="off" data-mode="buy">
     <div class="field">
       <label for="q">종목명 또는 코드</label>
+      <!--
+        required 를 여기 정적으로 두지 않는다 — 이 필드는 #content(위
+        통과 커튼 주석 참조) 아래 있고, #content 는 처음엔 정적으로
+        hidden 이다. app.js 가 #content 를 열 때(revealContent()) 이
+        required 도 같이 켠다.
+      -->
       <input id="q" placeholder="예: 삼성전자 또는 005930" list="cands"
-             autocapitalize="off" autocorrect="off" spellcheck="false" required>
+             autocapitalize="off" autocorrect="off" spellcheck="false">
       <datalist id="cands"></datalist>
     </div>
 
@@ -100,11 +145,13 @@
         되거나 붙여넣기 자체가 막힌다). app.js는 Number() 로 변환하기 전에
         콤마·공백을 제거할 것.
       -->
-      <input id="price" type="text" inputmode="numeric" placeholder="매입가" required>
+      <!-- required 는 #price 에도 정적으로 두지 않는다 — #q 바로 위 주석과 같은 이유. -->
+      <input id="price" type="text" inputmode="numeric" placeholder="매입가">
     </div>
     <div class="field">
       <label for="date">매입일</label>
-      <input id="date" type="date" required>
+      <!-- required 는 #date 에도 정적으로 두지 않는다 — #q 바로 위 주석과 같은 이유. -->
+      <input id="date" type="date">
     </div>
     <div class="field" id="exit-price-field" hidden>
       <label for="exit-price">매도가</label>
@@ -147,6 +194,8 @@
   </form>
   <p class="hint">버튼을 누르면 깃허브 이슈 화면이 열립니다. 거기서 한 번 더 누르면 반영됩니다.</p>
 </section>
+
+</div><!-- #content -->
 
 <script src="app.js"></script>
 </body>

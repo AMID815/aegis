@@ -403,6 +403,13 @@ function nameCell(tr, r, mark) {
   span.textContent = (r.p.name || r.p.code || "?") + mark;
   wrap.appendChild(span);
   if (!r.bad && typeof r.p.id === "string" && r.p.id) {
+    // 대기(pending) 기록에는 고치기를 달지 않는다. 달면 startAmend 가
+    // isReadablePosition(buys 가 비어 있어 false)에서 막으면서 "이 기록은
+    // 형식이 올바르지 않아 고칠 수 없습니다" 라고 말하는데, 그건 거짓이다
+    // — 손상된 게 아니라 아직 안 산 것뿐이다. 사용자가 파일이 깨졌다고
+    // 믿고 손편집하러 가게 만드는, amend 가 없애려던 바로 그 루프다.
+    // (지정가 자체를 고치는 건 아직 연산이 없다 — 지우고 다시 넣는다.)
+    if (!r.pending) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "amend-btn";
@@ -410,6 +417,7 @@ function nameCell(tr, r, mark) {
     btn.dataset.id = r.p.id;
     btn.setAttribute("aria-label", "고치기: " + (r.p.name || r.p.code || "?"));
     wrap.appendChild(btn);
+    }
 
     // 자동/수동 토글 — 종결된 기록(closed)은 더 이상 물타기·익절·손절의
     // 대상이 아니므로(전부 이미 끝났다) 보여줄 이유가 없다. 열려 있거나

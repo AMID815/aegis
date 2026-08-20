@@ -370,3 +370,53 @@ def test_이름이_깨져도_가격_None인_행이_섞여있으면_전체가_실
             + '</a></td>\n<td class="number">-</td>\n')
     with pytest.raises(naver.EmptyParseError):
         naver.parse_market_sum(html)
+
+
+# ── Task 5: 분봉 파서 ────────────────────────────────────────
+#
+# fchart 의 timeframe=minute 은 시·고·저가가 전부 null 이고 종가만 온다
+# (2026-08-20 실측, 2,667개 전수 확인). 지정가 체결 판정은 그 분 안의
+# 고가·저가가 있어야 가능하므로 OHLC 를 다 주는 api.stock.naver.com 을 쓴다.
+
+MINUTE_JSON = """[
+ {"localDateTime":"20260820090000","currentPrice":256500.0,"openPrice":257000.0,
+  "highPrice":258500.0,"lowPrice":256500.0,"accumulatedTradingVolume":949560},
+ {"localDateTime":"20260820090100","currentPrice":255000.0,"openPrice":256500.0,
+  "highPrice":257000.0,"lowPrice":254500.0,"accumulatedTradingVolume":1002000}
+]"""
+
+
+def test_분봉_파싱():
+    out = naver.parse_minute(MINUTE_JSON)
+    assert out == [
+        {"t": "202608200900", "high": 258500, "low": 256500},
+        {"t": "202608200901", "high": 257000, "low": 254500},
+    ]
+
+
+def test_분봉은_시간_오름차순으로_정렬된다():
+    """재생이 순서에 의존한다 — 응답 순서를 믿지 않는다."""
+    body = """[
+     {"localDateTime":"20260820090100","highPrice":2.0,"lowPrice":1.0},
+     {"localDateTime":"20260820090000","highPrice":4.0,"lowPrice":3.0}
+    ]"""
+    assert [m["t"] for m in naver.parse_minute(body)] == \
+        ["202608200900", "202608200901"]
+
+
+def test_망가진_분봉_한_건이_전체를_죽이지_않는다():
+    """polling·market_sum 과 같은 태도 — 한 항목이 이상해도 나머지는 살린다."""
+    body = """[
+     {"localDateTime":"20260820090000","highPrice":2.0,"lowPrice":1.0},
+     {"localDateTime":"20260820090100","highPrice":"-","lowPrice":1.0},
+     "쓰레기",
+     {"localDateTime":"20260820090200","highPrice":6.0,"lowPrice":5.0}
+    ]"""
+    assert [m["t"] for m in naver.parse_minute(body)] == \
+        ["202608200900", "202608200902"]
+
+
+def test_분봉이_0건이면_거부한다():
+    """빈 응답을 '오늘 거래 없음' 으로 조용히 넘기면 체결을 통째로 놓친다."""
+    with pytest.raises(naver.EmptyParseError):
+        naver.parse_minute("[]")

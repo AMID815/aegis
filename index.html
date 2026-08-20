@@ -132,6 +132,20 @@
         중에는 #q 를 바꿔도 매입/매도 자동 전환이 일어나지 않는다.
   -->
   <form id="form" autocomplete="off" data-mode="buy">
+    <!--
+      Task 13(지정가 관찰): 입력 방식 선택 — 폼 맨 앞에 둬서 나머지 필드가
+      뭘 요구하는지(매입가 대 지정가) 먼저 정하고 들어가게 한다. 이 셀렉트
+      는 app.js updateMode()/applyMode() 계약을 하나 더 늘린다: 값이
+      "watch"면 #q 로 고른 종목의 보유 여부와 무관하게 지정가 관찰 모드를
+      유지한다(매입/매도 자동판정에 안 밀린다).
+    -->
+    <div class="field" id="entry-mode-field">
+      <label for="entry-mode">입력 방식</label>
+      <select id="entry-mode">
+        <option value="buy">지금 관측 (오늘 가격으로 시작)</option>
+        <option value="watch">지정가 관찰 (그 가격에 닿으면 시작)</option>
+      </select>
+    </div>
     <div class="field">
       <label for="q">종목명 또는 코드</label>
       <!--
@@ -147,7 +161,7 @@
 
     <div id="mode" class="mode" hidden></div>
 
-    <div class="field">
+    <div class="field" id="price-field">
       <label id="price-label" for="price">매입가</label>
       <!--
         type=number 대신 text+inputmode=numeric을 쓴다: 매입가를 "247,500"처럼
@@ -157,6 +171,19 @@
       -->
       <!-- required 는 #price 에도 정적으로 두지 않는다 — #q 바로 위 주석과 같은 이유. -->
       <input id="price" type="text" inputmode="numeric" placeholder="매입가">
+    </div>
+    <!--
+      지정가 관찰 모드에서만 보인다(#entry-mode=watch). #price 와 같은 이유로
+      type=number 를 쓰지 않는다 — "247,500"처럼 콤마 포함 값이 통째로
+      버려진다. required 도 여기 정적으로 두지 않는다: hidden 조상 아래
+      정적 required 가 있으면 tests/test_index_html.py 의 가드에 걸리고,
+      실제로도 이 페이지가 이미 한 번 겪은 사고(콘솔에만 남는 죽은 submit)
+      를 그대로 재현한다. app.js 의 setWatchFieldVisible() 이 hidden 과
+      required 를 같이 켜고 끈다.
+    -->
+    <div class="field" id="watch-field" hidden>
+      <label for="watch-price">지정가 (이 가격에 닿으면 매수)</label>
+      <input id="watch-price" type="text" inputmode="numeric" autocomplete="off">
     </div>
     <div class="field">
       <label for="date">매입일</label>

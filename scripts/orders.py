@@ -26,8 +26,17 @@ def plan(first_price: int) -> dict:
     2차·3차의 근거 가격이 소급해서 바뀐다.
 
     원 단위 정수로 반올림한다(절단 아님 — models._price 와 같은 이유로
-    계통적 편향을 만들지 않는다). 정수가 아니면 models._price 가 저장
-    단계에서 거부한다.
+    계통적 편향을 만들지 않는다). models._price 자체는 정수가 아닌 값을
+    반올림할 뿐 거부하지 않는다 — 거부는 models.normalize() 가 하고,
+    그것도 이미 디스크에 저장된 값이 정수가 아닐 때(손편집 흔적)뿐이다.
+
+    **하한이 있다** (2026-08-20 리뷰): 1차가가 40원 이하면 반올림 때문에
+    손절선이 3차가보다 위로 올라가 이 설계의 핵심 부등식이 깨진다(3차 체결
+    즉시 손절). 12원 이하면 buy2 ≤ buy3 로 순서까지 무너지고, 8원이면
+    buy2 가 1차가와 같아져 할인이 사라진다. 막지 않는 이유는 여기서 거부하면
+    models.apply_buy 가 통째로 실패해 그 종목을 아예 관측할 수 없게 되기
+    때문이다 — 정리매매·관리종목이 아니면 닿지 않는 영역이라, 거부보다
+    기록해두는 쪽을 골랐다.
     """
     return {
         "buy2": round(first_price * BUY2_RATIO),
@@ -55,11 +64,15 @@ def take_profit(prices: list) -> int:
     return round(average(prices) * TAKE_PROFIT_RATIO)
 
 
-def stop_loss(prices: list):
+def stop_loss(prices: list) -> int | None:
     """손절선. **3차 체결 후에만** 존재한다(설계 §2). 그 전에는 None.
 
     3차까지 안 간 종목은 손절 경로가 없어 영원히 열려 있을 수 있다 —
     설계 §11 이 명시한 한계이고, 통계 화면이 미결 건수를 드러내야 한다.
+
+    체결이 아예 없어도(`prices == []`) None 이다 — `len(prices) < 3` 에
+    걸려 average() 의 빈 리스트 거부(ValueError)까지 가지 않는다. 손절선이
+    없다는 결론은 같지만 경로가 다르다는 뜻이라 여기 적어둔다.
     """
     if len(prices) < 3:
         return None

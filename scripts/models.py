@@ -31,6 +31,12 @@ SCHEMA = 1
 CODE_RE = re.compile(r"^[0-9A-Z]{6}\Z")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 OPEN, CLOSED, PENDING, EXPIRED = "open", "closed", "pending", "expired"
+# 지정가 관찰의 기본 관찰 기간(거래일) — 사용자가 3에서 5로 조정했다
+# (2026-08-21). 상수 하나로 뽑아둔 이유: normalize() 도 이제(CHANGE 2,
+# 아래 _watch_sane/normalize 참조) days 가 없는 옛 기록에 같은 기본값을
+# 채워 넣는다 — apply_watch(쓰기 시점 기본값)와 normalize(읽기 시점 채움)
+# 가 서로 다른 숫자를 하드코딩하면 조용히 어긋난다.
+WATCH_DAYS_DEFAULT = 5
 
 
 class RejectedError(Exception):
@@ -119,8 +125,8 @@ def _orders_sane(ords: dict, buys: list) -> bool:
 
 
 def _watch_days(v):
-    """지정가 관찰의 기한(거래일 수) — 없으면 기본 3, 있으면 1~60 사이의
-    진짜 정수만 받는다.
+    """지정가 관찰의 기한(거래일 수) — 없으면 기본 WATCH_DAYS_DEFAULT(5),
+    있으면 1~60 사이의 진짜 정수만 받는다.
 
     상한 60 은 "60거래일이면 분 단위로 정확하다"는 보장이 아니다 —
     분봉 재생 창은 약 7거래일뿐이고, 그 뒤로도 autofill 은 일봉만으로
@@ -132,7 +138,7 @@ def _watch_days(v):
     조용히 통과한다.
     """
     if v is None:
-        return 3
+        return WATCH_DAYS_DEFAULT
     if isinstance(v, bool) or not isinstance(v, int):
         raise RejectedError(f"관찰 기간이 정수가 아님: {v!r}")
     if not (1 <= v <= 60):
@@ -152,7 +158,20 @@ def _watch_sane(w) -> bool:
 
     `expired_on`(apply_expire 가 덧붙이는 필드) 은 여기서 검사하지 않는다
     — `_orders_sane` 이 `customized` 를 별도로만 보듯, 이 함수는 만료
-    여부와 무관하게 항상 있어야 하는 세 필드(price/date/days)만 본다.
+    여부와 무관하게 항상 있어야 하는 필드(price/date, 그리고 있다면 days)만 본다.
+
+    **`days` 가 아예 없는 것은 여기서 통과시킨다(CHANGE 2).** `days` 는
+    이 브랜치가 새로 만든 필드라, 그 이전에 만들어진 pending/expired
+    기록은 `watch` 에 `{price, date}` 두 키만 있고 `days` 자체가 없다.
+    그건 "손상"이 아니라 "그때는 없었던 필드"다 — 격리하면 실제로
+    대기 중인 주문이 오늘부로 화면과 autofill 에서 통째로 사라진다.
+    호출부(normalize)가 이 함수를 통과한 뒤 기본값(WATCH_DAYS_DEFAULT)을
+    채워 넣는다. 반대로 `days` 가 **있는데** 모양이 틀리면(0/음수/60초과/
+    bool/문자열/소수) 여전히 손편집 흔적이므로 그대로 격리한다 — "없음"과
+    "있는데 틀림"을 하나로 합쳐 전부 막거나 전부 통과시키지 말 것. 합치면
+    전자는(옛 정상 기록 격리) CHANGE 2 가 고친 배포 사고가 재현되고,
+    후자는(손편집된 값이 조용히 기본값으로 둔갑) 이 함수가 존재하는
+    이유(만료 통제)가 무너진다.
     """
     if not isinstance(w, dict):
         return False
@@ -164,7 +183,8 @@ def _watch_sane(w) -> bool:
     except RejectedError:
         return False
     days = w.get("days")
-    if isinstance(days, bool) or not isinstance(days, int) or not (1 <= days <= 60):
+    if days is not None and (
+            isinstance(days, bool) or not isinstance(days, int) or not (1 <= days <= 60)):
         return False
     return True
 
@@ -308,6 +328,21 @@ def normalize(raw, dropped=None) -> dict:
             if dropped is not None:
                 dropped.append(p)
             continue
+        if never_bought:
+            # CHANGE 2 — watch.days 가 이 브랜치 이전엔 없던 필드라, 그때
+            # 만들어진 pending/expired 기록은 watch 에 {price, date} 두
+            # 키만 있다. 위 _watch_sane 이 "없음"을 이미 손상과 구분해
+            # 통과시켰으니, 여기서 기본값을 채운다 — **격리 대신 채움**이다.
+            # observed_at/auto/orders 등 다른 선택 필드에 이미 쓰는
+            # setdefault 관례와 같은 태도다: normalize() 는 "손상은 격리,
+            # 있어야 할 값이 없으면 기본값으로 채운다"이지 "고쳐 쓴다"가
+            # 아니다 — days 가 **있는데** 틀린 값(0/음수/60초과/bool/
+            # 문자열/소수)은 위에서 이미 격리됐으므로 여기 안 온다. 이
+            # 채움을 지우고 다시 격리로 되돌리지 말 것 — 그러면 이 필드
+            # 도입 이전의 모든 pending/expired 기록이 하루아침에 화면과
+            # autofill 에서 사라지는 배포 사고가 재현된다(지시문 CHANGE 2
+            # 가 고치려는 바로 그 사고).
+            p["watch"] = {**p["watch"], "days": p["watch"].get("days", WATCH_DAYS_DEFAULT)}
         exits = p.get("exits", [])
         if not isinstance(exits, list):   # buys 와 같은 이유: 있는데 리스트가 아니면 격리
             if dropped is not None:
@@ -425,7 +460,7 @@ def apply_watch(state: dict, req: dict) -> dict:
     이다. 체결되면 apply_watch_fill 이 1차 매수로 바꾸고 그 시점에
     2차·3차 지정가를 확정한다(설계 §7).
 
-    "며칠 이내에 N원에 닿으면 자동 매수" — `days`(거래일 수, 기본 3)가
+    "며칠 이내에 N원에 닿으면 자동 매수" — `days`(거래일 수, 기본 WATCH_DAYS_DEFAULT=5)가
     그 "며칠 이내에"다. 기한은 여기서 계산하지 않는다 — `watch.date` 와
     `watch.days` 를 그대로 저장해두고, 매일 판정은 autofill.run 이
     trading_calendar.watch_deadline 으로 한다(달력일이 아니라 거래일로
@@ -821,6 +856,75 @@ def apply_amend(state: dict, req: dict, changed_id: list | None = None) -> dict:
     state["positions"][idx] = new
     if changed_id is not None:
         changed_id.append(new["id"])
+    return state
+
+
+def apply_delete(state: dict, req: dict) -> dict:
+    """기록 하나를 완전히 지운다 — 이 시스템에서 **유일한 파괴적 연산**이다.
+
+    지금까지 스퍼리어스한(있어서는 안 될) 기록을 지우는 유일한 경로는
+    손편집이었다(apply_amend 독스트링의 "잔여 한계" 참조) — 이 함수가
+    처음으로 그걸 정식 연산으로 만든다.
+
+    페이로드: `{"op": "delete", "id": ..., "was": <code>, "was_price": <int>}`
+
+    대상은 `_target()` 으로 고른다(id + was 코드 대조) — apply_orders/
+    apply_auto 와 계약이 같고, 여기서 두 번째 조회를 새로 만들지 않는다.
+
+    **`was_price` 는 여기서 필수다 — `apply_amend` 는 선택으로 둔다.**
+    `id` 는 `날짜+코드` 라서, `was`(코드) 대조는 사실 id 자신의 접미사를
+    다시 확인하는 것뿐이라 단독으로는 약하다(apply_amend 독스트링의 id
+    재사용 경로 참조). 구체적으로: 어떤 기록의 `buy.date` 가 amend 로
+    옮겨지면 옛 (날짜+코드) id 가 비고, 그 자리를 정말 새 매수가 다시
+    채우면, 그 사이 떠 있던 낡은 delete 요청(옛 id 를 겨눈)이 `was` 만으로
+    통과해 **엉뚱한(새) 기록을 지워버릴 수 있다.** `apply_amend` 는 이
+    위험을 문서화하고도 `was_price` 를 선택으로 둔다 — 잘못 고쳐도
+    되돌릴 수 있으니까(다시 amend 하면 된다). 삭제는 되돌릴 수 없다 —
+    지워진 값 자체가 사라진다. 그래서 amend 와 같은 위험을 여기서는
+    감수하지 않고 `was_price` 를 강제한다.
+
+    대조할 가격의 출처는 기록의 모양에 따라 다르다:
+      - 정상 기록(매수가 있음, buys 가 비어있지 않음) → `buys[0]["price"]`.
+      - `pending`/`expired`(아직 안 샀거나 끝내 안 산 기록, buys 가 계속
+        비어 있다) → `watch["price"]` — 이 두 상태엔 "매입가" 자체가 없다
+        (목표가만 있다).
+
+    지운다는 건 `state["positions"]` 배열에서 완전히 빼는 것이다 —
+    tombstone(예: `status: "deleted"`)을 남기지 않는다. 남기면 그 행이
+    화면 표(보유/종결)와 통계 필터(승률·평균수익률·미결 집계 등) 어디에도
+    안 맞아 영원히 특수 케이스를 만든다 — 사용자가 원한 건 "지우기"이지
+    "숨기고 표시만 남기기"가 아니다.
+
+    대상이 없으면 `RejectedError`. **`AlreadyApplied` 는 없다** — 이미
+    지워진 것을 다시 지우는 요청과 애초에 없던 것을 지우는 요청은 이
+    함수 입장에서 구분할 방법이 없다(둘 다 "id 를 못 찾음"으로 온다).
+    다른 연산들의 `AlreadyApplied`(orders/auto/amend)는 "다시 보내도
+    안전하다"(재제출이 실수로 두 번 가도 결과가 같다)는 게 전제인데,
+    삭제에는 그 전제가 없다 — 엉뚱한 id 로 잘못 보낸 삭제 요청도 조용히
+    "이미 처리됨"으로 넘기면 그 실수를 알아챌 방법이 사라진다.
+    """
+    was_price = req.get("was_price")
+    if was_price is None:
+        raise RejectedError(
+            "was_price 가 필요함 — 삭제는 되돌릴 수 없어 amend 보다 엄격하게 대조한다")
+    try:
+        was_price_norm = _price(was_price)
+    except RejectedError as exc:
+        raise RejectedError(f"was_price 형식 오류: {exc}") from exc
+
+    state = normalize(state)
+    match = _target(state, req)
+
+    # 정상 기록은 buys[0].price, pending/expired 는 watch.price 로 대조한다
+    # — 이 두 상태는 아직 안 샀거나 끝내 안 사서 "매입가" 개념 자체가 없다.
+    stored_price = (match["watch"]["price"] if match["status"] in (PENDING, EXPIRED)
+                    else match["buys"][0]["price"])
+    if was_price_norm != stored_price:
+        raise RejectedError(
+            "매입가 불일치(was_price) — 저장된 값과 다름: "
+            f"저장={stored_price!r} 요청={was_price_norm!r}")
+
+    state["positions"] = [p for p in state["positions"] if p["id"] != match["id"]]
     return state
 
 

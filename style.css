@@ -29,9 +29,10 @@ th:first-child, td:first-child { text-align:left; }
    버튼 폭이 249px 까지 부풀고 다음 열(매입가) 위로 겹쳐 그린다(375px
    실측으로 발견 — getBoundingClientRect 로 확인, 화면으로는 안 보일
    수도 있는 종류의 결함이라 반드시 실측해야 했다). */
-/* .auto-toggle-btn(자동/수동 토글)도 같은 표 셀 안에 .amend-btn 과 나란히
-   앉는다 — 위 주석과 같은 폭 사고를 반복하지 않도록 같은 규칙을 공유한다. */
-.amend-btn, .auto-toggle-btn { font-size:.75rem; padding:2px 6px; flex-shrink:0; width:auto; }
+/* .auto-toggle-btn(자동/수동 토글)·.delete-btn(삭제)도 같은 표 셀 안에
+   .amend-btn 과 나란히 앉는다 — 위 주석과 같은 폭 사고를 반복하지 않도록
+   같은 규칙을 공유한다. */
+.amend-btn, .auto-toggle-btn, .delete-btn { font-size:.75rem; padding:2px 6px; flex-shrink:0; width:auto; }
 /* 자동 예외([수동]) 표시 — .asof/.field label 이 이미 쓰는 "옅은 보조 텍스트"
    톤을 그대로 따른다. 새 시각 언어를 더하지 않는다. */
 .manual-mark { color:var(--dim); font-size:.75rem; }

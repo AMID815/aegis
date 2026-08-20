@@ -71,6 +71,16 @@ def test_매도를_상태에_반영한다():
     assert out["positions"][0]["status"] == "closed"
 
 
+def test_삭제를_상태에_반영한다():
+    """apply() 는 op:delete 를 models.apply_delete 로 그대로 넘긴다 — 값
+    검증은 전부 models 의 일이라, 여기서는 라우팅만 확인한다."""
+    st = intake.apply(models.empty_state(), intake.extract(BODY))   # 매수 하나
+    delete_req = {"op": "delete", "id": "20260819-005930",
+                  "was": "005930", "was_price": 247500}
+    out = intake.apply(st, delete_req)
+    assert out["positions"] == []
+
+
 def test_모르는_op는_거부한다():
     with pytest.raises(models.RejectedError):
         intake.apply(models.empty_state(), {"op": "지워줘", "code": "005930"})
@@ -88,11 +98,11 @@ def test_지정가_관찰의_기간이_이슈_본문에서_끝까지_흘러간�
     assert p["watch"]["days"] == 10
 
 
-def test_지정가_관찰에서_기간을_안_주면_기본값_3이_흘러간다():
+def test_지정가_관찰에서_기간을_안_주면_기본값_5가_흘러간다():
     body = ('```json\n{"op":"watch","code":"005930","name":"삼성전자",'
             '"date":"2026-08-20","price":240000}\n```')
     out = intake.apply(models.empty_state(), intake.extract(body))
-    assert out["positions"][0]["watch"]["days"] == 3
+    assert out["positions"][0]["watch"]["days"] == 5
 
 
 def test_본문이_아주_길면_거부한다():
@@ -403,6 +413,61 @@ def test_반영_후_건수가_줄면_쓰지_않고_예외로_죽는다(monkeypat
     쓴것 = []
     monkeypatch.setattr(intake.gh, "write_json", lambda *a, **k: 쓴것.append(a))
     monkeypatch.setenv("ISSUE_BODY", BODY)
+    with pytest.raises(AssertionError):
+        intake.main()
+    assert 쓴것 == []
+
+
+# ---------------------------------------------------------------------------
+# CHANGE 3 — op:delete 는 위 "건수가 줄면 죽는다" 가드의 전제(buy 는 +1,
+# sell 은 개수 불변, 그래서 감소는 언제나 버그다)를 정면으로 깬다 — 삭제는
+# 정확히 1건 줄어드는 게 **정상**이다. 이 가드를 delete 인지 모른 채로
+# 그대로 두면 delete 는 intake.main() 을 통해서는 단 한 번도 성공할 수
+# 없다(항상 AssertionError). 아래는 그 실제 반영 경로를 겨눈다.
+# ---------------------------------------------------------------------------
+
+def test_delete가_intake_main을_통해_반영된다(monkeypatch):
+    기존 = {"schema": 1, "positions": [
+        {"id": "20260819-005930", "code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-08-19", "price": 247500}],
+         "exits": [], "adjustments": [], "status": "open",
+         "source": "종가베팅", "memo": "눌림", "signal_date": "2026-08-18"},
+    ]}
+    monkeypatch.setattr(intake.gh, "read_json", lambda *a, **k: (기존, "sha"))
+    captured = {}
+
+    def 가짜_쓰기(path, body, sha, message):
+        captured["body"] = body
+
+    monkeypatch.setattr(intake.gh, "write_json", 가짜_쓰기)
+    delete_body = ('```json\n{"op":"delete","id":"20260819-005930","was":"005930",'
+                   '"was_price":247500}\n```')
+    monkeypatch.setenv("ISSUE_BODY", delete_body)
+    assert intake.main() == 0
+    assert captured["body"]["positions"] == []
+
+
+def test_delete가_2건_이상_줄면_여전히_예외로_죽는다(monkeypatch):
+    """delete 는 정확히 1건만 줄어야 정상이다 — apply() 자체가 미래에
+    버그로 2건 이상을 지워버리는 상황을 흉내낸다(위 벨트 앤 브레이시스
+    테스트와 같은 방식, delete 전용 분기가 그 전제를 잃지 않았는지 확인)."""
+    기존 = {"schema": 1, "positions": [
+        {"id": "20260801-000660", "code": "000660", "name": "SK하이닉스",
+         "buys": [{"date": "2026-08-01", "price": 200000}],
+         "exits": [], "adjustments": [], "status": "open",
+         "source": "수동", "memo": "", "signal_date": None},
+        {"id": "20260819-005930", "code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-08-19", "price": 247500}],
+         "exits": [], "adjustments": [], "status": "open",
+         "source": "종가베팅", "memo": "눌림", "signal_date": "2026-08-18"},
+    ]}
+    monkeypatch.setattr(intake.gh, "read_json", lambda *a, **k: (기존, "sha"))
+    monkeypatch.setattr(intake, "apply", lambda state, req, changed_id=None: models.empty_state())
+    쓴것 = []
+    monkeypatch.setattr(intake.gh, "write_json", lambda *a, **k: 쓴것.append(a))
+    delete_body = ('```json\n{"op":"delete","id":"20260819-005930","was":"005930",'
+                   '"was_price":247500}\n```')
+    monkeypatch.setenv("ISSUE_BODY", delete_body)
     with pytest.raises(AssertionError):
         intake.main()
     assert 쓴것 == []

@@ -281,8 +281,9 @@ function heldDays(dayIndex, from, to) {
 // 의 JS 판박이다(파이썬 쪽이 정답, 이건 표시 전용이라 못 구하면 조용히
 // null 로 물러난다 — autofill 이 실제로 만료시키는 판단은 항상 서버 쪽
 // 값을 쓴다, 이 값은 화면 참고용일 뿐이다). watch.days 가 없는 옛 기록
-// (이 기능 이전에 등록된 관찰)은 서버 기본값 3 을 그대로 가정한다 —
-// models._watch_days 의 기본값과 맞춘다.
+// (이 기능 이전에 등록된 관찰)은 서버 기본값 5 를 그대로 가정한다 —
+// models.WATCH_DAYS_DEFAULT 와 맞춘다(2026-08-21: 사용자가 3에서 5로
+// 조정 — models.py 쪽 상수 하나만 바뀌면 여기도 같이 바꿔야 한다).
 //
 // "last"(가장 최근 확정 거래일) 기준으로 센다 — heldDays 가 이미 "오늘까지
 // 보유일수"를 last 기준으로 재는 것과 같은 이유(rows() 참조): 장중에는
@@ -292,7 +293,7 @@ function remainingWatchDays(dayIndex, days, last, watch) {
   if (!watch || typeof watch.date !== "string" || last === null) return null;
   const watchIdx = dayIndex.get(watch.date);
   if (watchIdx === undefined) return null;   // 등록일이 달력 밖 — 클램프하지 않는다
-  const n = typeof watch.days === "number" ? watch.days : 3;
+  const n = typeof watch.days === "number" ? watch.days : 5;
   const deadlineIdx = watchIdx + n;
   if (deadlineIdx >= days.length) return null;   // 달력이 아직 마감일까지 안 쌓였다
   const lastIdx = dayIndex.get(last);
@@ -443,11 +444,13 @@ function cell(tr, text, cls) {
 // createElement + textContent 로만 넣는다(innerHTML 금지, 종목명이 DOM에
 // 닿는 가장 위험한 지점).
 //
-// 버튼은 r.bad(읽을 수 없는 기록)이거나 id 가 없는 기록에는 안 붙인다 —
-// bad 기록은 어차피 이 파일 전체가 intake.py 의 최상위 손상 가드에
-// 걸려 어떤 op 도 반영될 수 없다(정상 기록까지 포함해서). "고치기"를
-// 눌러 이슈를 열어도 절대 반영될 수 없는 버튼을 보여주는 것보다,
-// 아예 안 보여주는 쪽이 정직하다.
+// 고치기/자동·수동 토글은 r.bad(읽을 수 없는 기록)이거나 id 가 없는
+// 기록에는 안 붙인다 — "고치기"는 amend 가 읽어야 할 매입가 자체를 못
+// 읽는 기록에서는 뜻이 없고, 자동/수동 토글도 물타기·익절·손절 판정이
+// 살아있는 정상 기록을 전제한다. 삭제는 다르다 — id 하나만 있으면
+// bad/pending/expired 를 가리지 않고 붙인다(nameCell 아래 삭제 블록의
+// 주석 참조). 망가지거나 끝난 기록을 지우는 게 바로 그런 행에서 가장
+// 필요하기 때문이다.
 function nameCell(tr, r, mark) {
   // <td> 자체는 손대지 않는다 — 일반 table-cell 로 남겨 다른 열과 같은
   // 폭 협상 규칙을 그대로 따르게 하고, flex 는 안에 넣는 별도 div 에만
@@ -494,6 +497,25 @@ function nameCell(tr, r, mark) {
         + (r.p.name || r.p.code || "?"));
       wrap.appendChild(toggleBtn);
     }
+  }
+
+  // 삭제 — 위 고치기/토글과 달리 !r.bad 게이트를 공유하지 않는다(지시문:
+  // 이 시스템의 유일한 파괴적 연산이라 다른 두 버튼보다 게이트를 더
+  // 좁히면 안 되고, 오히려 넓혀야 한다). id 하나만 있으면 단다 — bad·
+  // pending·expired 행에도: 망가지거나 끝난 기록을 지우는 게 정확히
+  // 그런 행에서 가장 필요하다. bad 행은 amend 로 못 고치는(형식이 틀려
+  // "고치기" 자체가 뜻이 없는) 기록인데, 지금까지 그런 기록을 없애는
+  // 유일한 경로는 손편집이었다 — 여기서 !r.bad 를 재사용하면 그 경로를
+  // 그대로 다시 막는 꼴이다. onDeleteButtonClick 이 가격을 못 읽는 행은
+  // (bad 기록) 추측해서 보내지 않고 손으로 고치라고 안내한다.
+  if (typeof r.p.id === "string" && r.p.id) {
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "delete-btn";
+    delBtn.textContent = "삭제";
+    delBtn.dataset.id = r.p.id;
+    delBtn.setAttribute("aria-label", "삭제: " + (r.p.name || r.p.code || "?"));
+    wrap.appendChild(delBtn);
   }
   td.appendChild(wrap);
 
@@ -1092,6 +1114,57 @@ function onAutoToggleButtonClick(e) {
               (nextAuto ? "AUTO-ON " : "AUTO-OFF ") + name, name);
 }
 
+// 삭제 — 이 시스템의 유일한 파괴적 연산이라(models.apply_delete 독스트링)
+// 다른 두 버튼(고치기/자동 토글)보다 더 엄격하게 다룬다. 같은 위임 클릭
+// 패턴(renderTable 이 tbody 를 매 렌더마다 통째로 비운다)과, 자동 토글과
+// 같은 즉시-전송(폼을 거치지 않음) 방식을 쓴다.
+//
+// was_price 의 출처는 표가 이미 그린 값이지 다시 계산하지 않는다 —
+// STATE 는 main() 이 받아온 스냅샷이라 amendTarget/startAmend 와 같은
+// 이유로 여기서도 그대로 쓴다(재조회는 서버가 어차피 id+was+was_price
+// 셋 다로 다시 대조한다 — 이 화면은 "무엇을 지우자는 건지" 보여주는
+// 역할까지만 하면 된다). 가격 출처는 models.apply_delete 와 같은 구분:
+// pending/expired 는 watch.price(아직 안 샀거나 끝내 안 사서 매입가
+// 자체가 없다), 그 외는 buys[0].price.
+//
+// bad 기록(가격을 안전하게 못 읽음)은 여기서 절대 추측하지 않는다 —
+// 잘못 짐작한 값을 보내면 서버 대조에서 막히긴 하지만, 그건 "왜 안
+// 되지"를 사용자가 직접 겪게 만드는 것뿐이다. 애초에 "이 기록은 손으로
+// 고쳐야 한다"고 바로 안내하고 아무것도 보내지 않는 쪽이 정직하다.
+function onDeleteButtonClick(e) {
+  const btn = e.target.closest(".delete-btn");
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const p = STATE.positions.find(x => x.id === id);
+  if (!p) {
+    alert("이 기록을 표에서 찾을 수 없습니다 — 새로고침 후 다시 시도해주세요.");
+    return;
+  }
+  const name = p.name || p.code || "?";
+  const code = p.code || "?";
+
+  let price = null;
+  if (p.status === "pending" || p.status === "expired") {
+    if (p.watch && typeof p.watch.price === "number") price = p.watch.price;
+  } else if (isReadablePosition(p)) {
+    price = p.buys[0].price;
+  }
+  if (price === null) {
+    alert("이 기록은 가격을 읽을 수 없어 자동으로 지울 수 없습니다 — "
+      + "positions.json 을 손으로 고쳐야 합니다.");
+    return;
+  }
+
+  const question = name + "(" + code + ") " + fmt(price) + "원 기록을 지웁니다.\n\n"
+    + "되돌릴 수 없습니다. 계속할까요?";
+  if (!confirm(question)) return;
+  // await 하지 않는다 — onAutoToggleButtonClick 과 같은 팝업 차단 회피
+  // 요령(writeRecord() 의 window.open 이 아직 이 클릭 이벤트와 같은 동기
+  // 구간 안에서 실행돼야 한다).
+  writeRecord({ op: "delete", id, was: code, was_price: price },
+              "DELETE " + name, name);
+}
+
 // id 로 STATE 에서 기록을 찾아 amend 폼을 채운다. **재조회하지 않는다** —
 // 이미 로드된 STATE 를 그대로 쓴다. 이게 diff 기준(어떤 필드를 "안 바뀜"
 // 으로 볼지)이 되어야 다음 문제를 피한다: 만약 여기서 다시 fetch 해서
@@ -1206,7 +1279,7 @@ function exitAmendMode() {
   // 상태가 된다(다음 #entry-mode change 나 #q input 이 있기 전까지).
   document.getElementById("entry-mode").value = "buy";
   document.getElementById("watch-price").value = "";
-  document.getElementById("watch-days").value = "3";
+  document.getElementById("watch-days").value = "5";
   applyMode("buy");
   fillCandidates("");
 }
@@ -1711,6 +1784,11 @@ document.getElementById("closed").addEventListener("click", onAmendButtonClick);
 // 에 걸어도 해가 되진 않지만, 실제로 쓰이지 않을 리스너를 다는 대신
 // 렌더가 실제로 그 버튼을 두는 표 하나에만 건다.
 document.getElementById("open").addEventListener("click", onAutoToggleButtonClick);
+// 삭제 버튼은 고치기와 달리 #open/#closed 양쪽 다 그려진다(bad/pending/
+// expired 는 status 값에 따라 어느 표에든 있을 수 있고, 정상 종결 기록은
+// #closed 에 있다) — 그래서 amend 와 같은 두 표 모두에 건다.
+document.getElementById("open").addEventListener("click", onDeleteButtonClick);
+document.getElementById("closed").addEventListener("click", onDeleteButtonClick);
 
 // main() 은 더 이상 이 자리에서 즉시 실행되지 않는다 — 통과 커튼(맨 아래
 // 절)이 통과된 뒤에만(이미 통과해 있었으면 로드 즉시, 아니면 #gate-form

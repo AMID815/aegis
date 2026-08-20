@@ -101,6 +101,8 @@ def apply(state: dict, req: dict, changed_id: list | None = None) -> dict:
         return models.apply_auto(state, req)
     if op == "watch":
         return models.apply_watch(state, req)
+    if op == "delete":
+        return models.apply_delete(state, req)
     raise models.RejectedError(f"모르는 op: {op!r}")
 
 
@@ -207,18 +209,32 @@ def main() -> int:
         print(f"거부: {e}")
         return 2
 
-    if len(out["positions"]) < prior_count:
+    op = req.get("op")
+    if op == "delete":
+        # delete(이 함수의 "nothing else" 범위 밖으로 튀어나온 한 가지
+        # 예외) 는 정확히 1건 줄어드는 게 **정상**이다 — apply_delete 가
+        # 대상 하나를 배열에서 뺀다. 아래 벨트 앤 브레이시스는 "buy 는
+        # +1, sell 은 개수 불변"을 전제로 삼는데 delete 는 그 전제를 깬다
+        # — 그대로 두면 delete 는 intake.main() 을 통해서는 단 한 번도
+        # 성공할 수 없다(실측: 항상 이 AssertionError). 그래서 delete 만
+        # 별도로, "정확히 1건 감소"를 기대치로 검사한다 — 1건보다 더
+        # 줄거나 안 줄면 여전히 코드 버그다.
+        if len(out["positions"]) != prior_count - 1:
+            raise AssertionError(
+                f"삭제 후 보유 건수가 예상과 다름({prior_count} → "
+                f"{len(out['positions'])}, 정확히 1건 감소를 기대함) "
+                f"— 쓰지 않고 중단, 코드 버그 의심")
+    elif len(out["positions"]) < prior_count:
         # 벨트 앤 브레이시스: 여기까지 온 이상 위의 가드들(최상위 구조,
         # dropped)이 전부 통과했으니 정상적으로는 절대 줄어들 수 없다
-        # (buy 는 +1, sell 은 개수 불변). 그런데도 줄었다면 이 코드
-        # 자신의 버그이지 사용자 입력도 파일 손상도 아니다 — "고쳐서
-        # 다시 제출"도 "파일을 손보라"도 오답이라 2/3/4 어디에도 넣지
-        # 않고 시끄럽게 죽는다.
+        # (buy 는 +1, sell 은 개수 불변, delete 는 위에서 따로 본다).
+        # 그런데도 줄었다면 이 코드 자신의 버그이지 사용자 입력도 파일
+        # 손상도 아니다 — "고쳐서 다시 제출"도 "파일을 손보라"도 오답이라
+        # 2/3/4 어디에도 넣지 않고 시끄럽게 죽는다.
         raise AssertionError(
             f"반영 후 보유 건수가 줄어듦({prior_count} → {len(out['positions'])}) "
             f"— 쓰지 않고 중단, 코드 버그 의심")
 
-    op = req.get("op")
     if op == "amend":
         # amend 는 buy/sell 과 달리 이번 요청이 name 을 안 건드렸을 수
         # 있다(패치 규칙) — 그러면 커밋 메시지용 이름은 "이번에 낸 값"이

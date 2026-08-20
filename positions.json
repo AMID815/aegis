@@ -5,26 +5,6 @@
    "auto": true,
    "buys": [
     {
-     "date": "2026-08-19",
-     "price": 247500
-    }
-   ],
-   "code": "005930",
-   "exits": [],
-   "id": "20260819-005930",
-   "memo": "첫 관측 — 2026-08-19 종가 기준 (amend 검증 통과)",
-   "name": "삼성전자",
-   "observed_at": null,
-   "orders": {},
-   "signal_date": null,
-   "source": "수동",
-   "status": "open"
-  },
-  {
-   "adjustments": [],
-   "auto": true,
-   "buys": [
-    {
      "date": "2026-08-21",
      "price": 170000
     }

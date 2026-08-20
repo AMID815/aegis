@@ -323,7 +323,14 @@ def test_정상적인_상태는_정규화해도_내용이_그대로다():
         "date": "2026-08-19", "source": "종가베팅",
         "signal_date": "2026-08-18", "memo": "메모",
     })
-    assert models.normalize(d) == d
+    out = models.normalize(d)
+    # 전체 dict 를 == 로 비교하지 않는다 — 스키마가 계속 자란다(Task 6 이
+    # orders/observed_at/auto 를 추가했듯). normalize() 가 apply_buy 는
+    # 아직 안 채우는 새 필드에 기본값을 얹는 것 자체는 "이미 있던 값이
+    # 그대로다"를 깨지 않으므로, 원래 있던 키만 값이 안 바뀌었는지 본다.
+    p, q = out["positions"][0], d["positions"][0]
+    for key in q:
+        assert p[key] == q[key]
 
 
 def test_시그널일_형식이_틀리면_거부한다():
@@ -916,3 +923,54 @@ def test_amend은_was_price로_id_재사용_사고를_막는다():
     새매수 = next(p for p in d2["positions"] if p["id"] == "20260819-005930")
     assert 새매수["memo"] == "낡은 이슈(was_price 없음)"
     assert 새매수["buys"][0]["price"] == 300000   # 여전히 "새 매수" 그 기록이다
+
+
+def test_normalize_가_새_필드에_기본값을_준다():
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [{"date": "2026-08-19", "price": 247500}]}]})
+    p = st["positions"][0]
+    assert p["auto"] is True          # 기본은 자동 — 예외는 명시적으로만
+    assert p["observed_at"] is None   # 옛 기록은 시각을 모른다
+    assert p["orders"] == {}          # 아직 주문가가 안 잡힌 기록
+
+
+def test_normalize_가_저장된_주문가를_보존한다():
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [{"date": "2026-08-19", "price": 247500}],
+        "orders": {"buy2": 232650, "buy3": 217800, "customized": True},
+        "observed_at": "2026-08-19T15:30", "auto": False}]})
+    p = st["positions"][0]
+    assert p["orders"]["buy2"] == 232650
+    assert p["orders"]["customized"] is True
+    assert p["observed_at"] == "2026-08-19T15:30"
+    assert p["auto"] is False
+
+
+def test_orders_가_dict_아니면_격리한다():
+    """buys/exits 와 같은 태도 — 있는데 모양이 틀리면 조용히 고치지 않는다."""
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [{"date": "2026-08-19", "price": 247500}],
+        "orders": ["망가짐"]}]}, dropped)
+    assert st["positions"] == []
+    assert len(dropped) == 1
+
+
+def test_auto_가_불리언_아니면_격리한다():
+    """문자열 "false" 는 파이썬에서 참이다 — 예외 지정이 조용히 무시되면
+    사용자가 막았다고 믿는 종목이 자동 매매된다."""
+    dropped = []
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930", "buys": [{"date": "2026-08-19", "price": 247500}],
+        "auto": "false"}]}, dropped)
+    assert st["positions"] == []
+    assert len(dropped) == 1
+
+
+def test_추가_매수가_있는_기록도_정상_통과한다():
+    st = models.normalize({"schema": 1, "positions": [{
+        "code": "005930",
+        "buys": [{"date": "2026-08-19", "price": 100000},
+                 {"date": "2026-08-20", "price": 94000, "kind": "buy2",
+                  "t": "202608200931", "auto": True}]}]})
+    assert len(st["positions"][0]["buys"]) == 2

@@ -279,7 +279,14 @@ def test_main_정상_백필_후_확정_커밋(monkeypatch, capsys):
         assert sha is None  # 새 파일 — 이미 있는 날짜에 쓰면 422
         assert body["date"] in (ALL_DAYS[-2], ALL_DAYS[-1])
         assert "005930" in body["closes"]
-        assert body["positions"] == 정상_보유["positions"]
+        # 전체 dict 를 == 로 비교하지 않는다 — 스키마가 계속 자란다(Task 6 이
+        # orders/observed_at/auto 를 추가했듯, normalize() 가 채워 넣는 새
+        # 필드가 늘어나는 것 자체는 "포지션 내용이 그대로다"를 깨지 않는다).
+        # 픽스처에 있던 키만 값이 안 바뀌었는지 본다.
+        assert len(body["positions"]) == len(정상_보유["positions"])
+        for got, want in zip(body["positions"], 정상_보유["positions"]):
+            for key, val in want.items():
+                assert got[key] == val
         assert body["price_basis"] == "asof-fetch"   # F4: 조회 시점 기준임을 스냅샷에 남긴다
 
     확정_path, 확정_body, 확정_sha, 확정_msg = 쓴것[2]

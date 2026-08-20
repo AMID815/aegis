@@ -656,7 +656,12 @@ def test_amend은_여러_기록_중_대상만_고치고_형제는_바이트단�
     assert by_id["20260819-005930"]["memo"] == "고침"
     for sib_id in ("20260801-000660", "20260805-035420"):
         원본_항목 = next(p for p in 원본["positions"] if p["id"] == sib_id)
-        assert by_id[sib_id] == 원본_항목   # 형제 기록은 완전히 그대로
+        # 전체 dict 를 == 로 비교하지 않는다 — 스키마가 계속 자란다(Task 6 이
+        # orders/observed_at/auto 를 추가했듯, normalize() 가 채워 넣는 새
+        # 필드가 늘어나는 것 자체는 "형제 기록이 그대로다"를 깨지 않는다).
+        # 원본 픽스처에 있던 키만 값이 안 바뀌었는지 본다.
+        for key, val in 원본_항목.items():
+            assert by_id[sib_id][key] == val   # 형제 기록은 완전히 그대로
 
 
 기존_닫힌 = {"schema": 1, "positions": [

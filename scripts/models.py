@@ -187,6 +187,19 @@ def normalize(raw, dropped=None) -> dict:
             if dropped is not None:
                 dropped.append(p)
             continue
+        # ── 가상 지정가 주문 필드 (설계 §2) ──────────────────────────────
+        # buys/exits 와 같은 태도: 있는데 모양이 틀리면 조용히 고치지 않고
+        # 격리한다. 특히 `auto` 는 불리언이 아니면 반드시 막아야 한다 —
+        # 문자열 "false" 는 파이썬에서 **참**이라, 예외 지정이 조용히
+        # 무시되면 사용자가 막았다고 믿는 종목이 자동 매매된다.
+        if not isinstance(p.get("orders", {}), dict):
+            if dropped is not None:
+                dropped.append(p)
+            continue
+        if "auto" in p and not isinstance(p["auto"], bool):
+            if dropped is not None:
+                dropped.append(p)
+            continue
         p.setdefault("id", f"{p['buys'][0]['date'].replace('-', '')}-{p['code']}")
         p.setdefault("name", p["code"])
         p.setdefault("signal_date", None)
@@ -195,6 +208,12 @@ def normalize(raw, dropped=None) -> dict:
         p.setdefault("status", OPEN)
         p.setdefault("source", "수동")
         p.setdefault("memo", "")
+        p.setdefault("orders", {})
+        # 옛 기록은 관측 시각을 모른다 — None 이면 그날 15:30 관측으로
+        # 간주해 다음 거래일부터 판정한다(설계 §5, autofill.after 가 처리).
+        p.setdefault("observed_at", None)
+        # 기본은 자동. 예외는 명시적으로 auto:false 를 넣어야만 된다.
+        p.setdefault("auto", True)
         good.append(p)
     # schema/positions 이외의 키를 보존한다 — 위 docstring 참조(코드리뷰
     # G2). deepcopy 하는 이유는 position 항목과 같다: 반환값이 raw 의

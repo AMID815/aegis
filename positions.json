@@ -2,6 +2,7 @@
  "positions": [
   {
    "adjustments": [],
+   "auto": true,
    "buys": [
     {
      "date": "2026-08-19",
@@ -13,6 +14,32 @@
    "id": "20260819-005930",
    "memo": "첫 관측 — 2026-08-19 종가 기준 (amend 검증 통과)",
    "name": "삼성전자",
+   "observed_at": null,
+   "orders": {},
+   "signal_date": null,
+   "source": "수동",
+   "status": "open"
+  },
+  {
+   "adjustments": [],
+   "auto": true,
+   "buys": [
+    {
+     "date": "2026-08-21",
+     "price": 170000
+    }
+   ],
+   "code": "000660",
+   "exits": [],
+   "id": "20260821-000660",
+   "memo": "",
+   "name": "SK하이닉스",
+   "observed_at": null,
+   "orders": {
+    "buy2": 159800,
+    "buy3": 149600,
+    "customized": false
+   },
    "signal_date": null,
    "source": "수동",
    "status": "open"

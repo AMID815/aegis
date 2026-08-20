@@ -654,14 +654,18 @@ def test_amend은_여러_기록_중_대상만_고치고_형제는_바이트단�
     by_id = {p["id"]: p for p in captured["body"]["positions"]}
     assert len(by_id) == 3
     assert by_id["20260819-005930"]["memo"] == "고침"
+    # 비교 대상은 **정규화를 거친** 원본이다. intake 는 쓰기 전에 반드시
+    # normalize() 를 거치므로(Task 6 이 orders/observed_at/auto 기본값을
+    # 채운다) 날것 픽스처와 == 로 비교하면 amend 와 무관하게 깨진다.
+    #
+    # 그렇다고 "픽스처에 있던 키만 값이 같은지" 로 느슨하게 풀면 이 테스트
+    # 이름이 약속하는 **바이트단위** 보장이 사라진다 — 형제에 엉뚱한 키가
+    # 새로 붙어도 안 잡힌다. 정규화된 원본과 통째로 == 비교하면 스키마가
+    # 자라도 안 깨지면서 그 보장은 그대로 지킨다.
+    정규화된_원본 = {p["id"]: p
+                for p in models.normalize(_copy.deepcopy(원본))["positions"]}
     for sib_id in ("20260801-000660", "20260805-035420"):
-        원본_항목 = next(p for p in 원본["positions"] if p["id"] == sib_id)
-        # 전체 dict 를 == 로 비교하지 않는다 — 스키마가 계속 자란다(Task 6 이
-        # orders/observed_at/auto 를 추가했듯, normalize() 가 채워 넣는 새
-        # 필드가 늘어나는 것 자체는 "형제 기록이 그대로다"를 깨지 않는다).
-        # 원본 픽스처에 있던 키만 값이 안 바뀌었는지 본다.
-        for key, val in 원본_항목.items():
-            assert by_id[sib_id][key] == val   # 형제 기록은 완전히 그대로
+        assert by_id[sib_id] == 정규화된_원본[sib_id]   # 형제 기록은 완전히 그대로
 
 
 기존_닫힌 = {"schema": 1, "positions": [

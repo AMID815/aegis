@@ -974,3 +974,84 @@ def test_추가_매수가_있는_기록도_정상_통과한다():
                  {"date": "2026-08-20", "price": 94000, "kind": "buy2",
                   "t": "202608200931", "auto": True}]}]})
     assert len(st["positions"][0]["buys"]) == 2
+
+
+# ── Task 7: apply_fills — 체결을 기록에 반영 ──────────────────────────────
+
+
+def _fpos(**over):
+    p = {"id": "20260819-005930", "code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-08-19", "price": 100000}],
+         "exits": [], "adjustments": [], "status": "open",
+         "source": "종가베팅", "memo": "", "signal_date": None,
+         "orders": {"buy2": 94000, "buy3": 88000}, "auto": True,
+         "observed_at": "2026-08-19T15:30"}
+    p.update(over)
+    return {"schema": 1, "positions": [p]}
+
+
+def test_물타기_체결이_buys에_추가된다():
+    st = models.apply_fills(_fpos(), "20260819-005930", [
+        {"kind": "buy2", "t": "202608200931", "price": 94000}], "2026-08-20")
+    buys = st["positions"][0]["buys"]
+    assert len(buys) == 2
+    assert buys[1] == {"date": "2026-08-20", "price": 94000, "kind": "buy2",
+                       "t": "202608200931", "auto": True}
+    assert st["positions"][0]["status"] == "open"
+
+
+def test_익절_체결이_기록을_닫는다():
+    st = models.apply_fills(_fpos(), "20260819-005930", [
+        {"kind": "take_profit", "t": "202608200931", "price": 105300}], "2026-08-20")
+    p = st["positions"][0]
+    assert p["status"] == "closed"
+    assert p["exits"] == [{"date": "2026-08-20", "price": 105300,
+                           "reason": "자동익절", "t": "202608200931",
+                           "auto": True, "session": "KRX",
+                           "weighting": "shares", "minute_verified": True}]
+
+
+def test_한_번에_여러_체결이_순서대로_반영된다():
+    """갭하락으로 같은 분에 2차·3차·손절이 함께 나는 경우(설계 §4-1)."""
+    st = models.apply_fills(_fpos(), "20260819-005930", [
+        {"kind": "buy2", "t": "202608200900", "price": 94000},
+        {"kind": "buy3", "t": "202608200900", "price": 88000},
+        {"kind": "stop_loss", "t": "202608200900", "price": 85540},
+    ], "2026-08-20")
+    p = st["positions"][0]
+    assert [b["price"] for b in p["buys"]] == [100000, 94000, 88000]
+    assert p["status"] == "closed"
+    assert p["exits"][0]["reason"] == "자동손절"
+
+
+def test_분_단위_미확인이면_표시가_남는다():
+    """분봉 창(7거래일)을 넘겨 일봉으로만 판정한 경우(설계 §9)."""
+    st = models.apply_fills(_fpos(), "20260819-005930", [
+        {"kind": "stop_loss", "t": None, "price": 85540}], "2026-08-20",
+        minute_verified=False)
+    assert st["positions"][0]["exits"][0]["minute_verified"] is False
+
+
+def test_이미_닫힌_기록에는_반영하지_않는다():
+    with pytest.raises(models.RejectedError):
+        models.apply_fills(_fpos(status="closed",
+                                 exits=[{"date": "2026-08-20", "price": 1,
+                                         "reason": ""}]),
+                           "20260819-005930",
+                           [{"kind": "buy2", "t": "1", "price": 94000}],
+                           "2026-08-20")
+
+
+def test_체결이_없으면_AlreadyApplied():
+    """빈 커밋을 만들지 않는다 — apply_amend 와 같은 계약."""
+    with pytest.raises(models.AlreadyApplied):
+        models.apply_fills(_fpos(), "20260819-005930", [], "2026-08-20")
+
+
+def test_예외_지정된_기록에는_반영하지_않는다():
+    """autofill 이 이미 걸러야 하지만, 여기서도 막는다 — 예외는 사용자가
+    '이 종목은 건드리지 마라'고 한 것이라 이중으로 지킨다."""
+    with pytest.raises(models.RejectedError):
+        models.apply_fills(_fpos(auto=False), "20260819-005930",
+                           [{"kind": "buy2", "t": "1", "price": 94000}],
+                           "2026-08-20")

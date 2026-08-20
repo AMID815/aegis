@@ -496,3 +496,62 @@ def apply_amend(state: dict, req: dict, changed_id: list | None = None) -> dict:
     if changed_id is not None:
         changed_id.append(new["id"])
     return state
+
+
+# 체결 종류 → exits.reason 에 남길 한글 라벨. 화면은 이 문자열로 자동/수동을
+# 구분하지 않는다(exits[].auto 를 본다) — 라벨은 사람이 읽기 위한 것이다.
+_FILL_REASON = {"take_profit": "자동익절", "stop_loss": "자동손절"}
+
+
+def apply_fills(state: dict, pid: str, fills: list, day: str,
+                minute_verified: bool = True) -> dict:
+    """분봉 재생(orders.replay)의 결과를 기록 하나에 반영한다.
+
+    `fills` 는 **발생 순서대로** 온다. 갭하락으로 같은 분에 2차·3차·손절이
+    한꺼번에 나는 경우(설계 §4-1)를 그 순서 그대로 기록한다 — 나중에
+    "왜 하루에 세 건이 찍혔나"를 읽을 수 있어야 한다.
+
+    체결이 하나도 없으면 `AlreadyApplied` — 빈 커밋을 만들지 않는다
+    (apply_amend 와 같은 계약).
+
+    `minute_verified=False` 는 분봉 창(약 7거래일)을 넘겨 일봉으로만
+    판정한 경우다(설계 §9). 그날 손절선·익절선을 둘 다 스쳤다면 순서를
+    알 수 없어 **손절로 기록**하는데(승률을 부풀리지 않는 쪽), 그 사실을
+    이 플래그로 남겨 통계에서 걸러 볼 수 있게 한다.
+
+    `weighting` 을 매도 기록에 함께 저장한다 — 지금은 항상 "shares"
+    (동일 수량 가정)지만, 나중에 "amount"(동일 금액, 조화평균)로 바꿔도
+    **이미 체결된 과거 기록의 평균가가 소급해서 바뀌면 안 되기** 때문이다
+    (설계 §3).
+    """
+    state = normalize(state)
+    match = next((p for p in state["positions"] if p["id"] == pid), None)
+    if match is None:
+        raise RejectedError(f"대상 없음: {pid!r}")
+    if not match.get("auto", True):
+        # autofill 이 이미 걸러야 하지만 여기서도 막는다 — 예외는 사용자가
+        # "이 종목은 건드리지 마라"고 한 것이라 이중으로 지킨다.
+        raise RejectedError(f"자동 예외로 지정된 기록: {pid!r}")
+    if match["status"] == CLOSED or match["exits"]:
+        raise RejectedError(f"이미 종결된 기록: {pid!r}")
+    if not fills:
+        raise AlreadyApplied(pid)
+
+    for f in fills:
+        kind = f["kind"]
+        price = _price(f["price"])
+        if kind in ("buy2", "buy3"):
+            match["buys"].append({"date": _date(day), "price": price,
+                                  "kind": kind, "t": f["t"], "auto": True})
+        elif kind in _FILL_REASON:
+            match["exits"].append({
+                "date": _date(day), "price": price,
+                "reason": _FILL_REASON[kind], "t": f["t"], "auto": True,
+                "session": "KRX",          # 설계 §6 — 지금은 상수, 확장 대비
+                "weighting": "shares",     # 설계 §3 — 소급 변경 방지
+                "minute_verified": minute_verified})
+            match["status"] = CLOSED
+            break   # 닫힌 뒤의 체결은 없다(replay 도 거기서 멈춘다)
+        else:
+            raise RejectedError(f"모르는 체결 종류: {kind!r}")
+    return state

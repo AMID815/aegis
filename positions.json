@@ -58,7 +58,13 @@
     }
    ],
    "code": "036930",
-   "exits": [],
+   "exits": [
+    {
+     "date": "2026-08-21",
+     "price": 400000,
+     "reason": ""
+    }
+   ],
    "id": "20260821-036930",
    "memo": "",
    "name": "주성엔지니어링",
@@ -70,7 +76,7 @@
    },
    "signal_date": null,
    "source": "수동",
-   "status": "open"
+   "status": "closed"
   }
  ],
  "schema": 1

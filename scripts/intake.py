@@ -76,6 +76,33 @@ def extract(body: str) -> dict:
     return d
 
 
+# op → 처리 함수. 모든 핸들러를 (state, req, changed_id) 로 통일해두면
+# amend 만 다른 인자수를 갖는 특별 취급이 dict 밖으로 새지 않는다 — changed_id
+# 를 실제로 쓰는 건 apply_amend 뿐이고 나머지는 그냥 무시한다.
+#
+# **KNOWN_OPS 는 이 dict 의 키에서 뽑는다**(worker/worker.js 의 같은 이름
+# 상수와 짝을 이루는 값 — tests/test_worker_known_ops.py 가 대조한다). 예전엔
+# apply() 가 아래처럼 if/elif 사슬로 op 를 분기했는데, "이 코드가 아는 op
+# 전체 목록"을 다른 곳(worker.js)이 손으로 베껴야 했다 — 그 목록이
+# {buy, sell, amend} 로 낡은 채 watch/orders/auto/delete 네 op 가 배포된 적이
+# 실제로 있다(2026-08-21, 패스프레이즈 검사가 op 검사보다 먼저라 흔한
+# 스모크 테스트로는 못 잡힌다). dict 로 바꾼 이유는 KNOWN_OPS 를 "따로
+# 유지되는 목록"이 아니라 "apply() 자신이 라우팅에 실제로 쓰는 값"으로
+# 만들어, intake.py 내부에서는 이 둘이 구조적으로 벌어질 수 없게 하기
+# 위해서다 — dispatch 테이블에 없는 op 를 apply() 가 처리할 방법이 없다.
+_OP_HANDLERS = {
+    "buy": lambda state, req, changed_id: models.apply_buy(state, req),
+    "sell": lambda state, req, changed_id: models.apply_sell(state, req),
+    "amend": lambda state, req, changed_id: models.apply_amend(state, req, changed_id),
+    "orders": lambda state, req, changed_id: models.apply_orders(state, req),
+    "auto": lambda state, req, changed_id: models.apply_auto(state, req),
+    "watch": lambda state, req, changed_id: models.apply_watch(state, req),
+    "delete": lambda state, req, changed_id: models.apply_delete(state, req),
+}
+
+KNOWN_OPS = frozenset(_OP_HANDLERS)
+
+
 def apply(state: dict, req: dict, changed_id: list | None = None) -> dict:
     """req 를 state 에 반영한다. 필드별 검증은 전부 models 에 위임한다.
 
@@ -89,21 +116,10 @@ def apply(state: dict, req: dict, changed_id: list | None = None) -> dict:
     None 이라 기존 2-인자 호출부는 안 깨진다.
     """
     op = req.get("op")
-    if op == "buy":
-        return models.apply_buy(state, req)
-    if op == "sell":
-        return models.apply_sell(state, req)
-    if op == "amend":
-        return models.apply_amend(state, req, changed_id)
-    if op == "orders":
-        return models.apply_orders(state, req)
-    if op == "auto":
-        return models.apply_auto(state, req)
-    if op == "watch":
-        return models.apply_watch(state, req)
-    if op == "delete":
-        return models.apply_delete(state, req)
-    raise models.RejectedError(f"모르는 op: {op!r}")
+    handler = _OP_HANDLERS.get(op)
+    if handler is None:
+        raise models.RejectedError(f"모르는 op: {op!r}")
+    return handler(state, req, changed_id)
 
 
 def _single_line(v, limit: int = 40):

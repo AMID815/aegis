@@ -22,10 +22,20 @@ JS 로 한 번 더 옮겨야 하는데 — **두 구현이 갈리면 화면이 �
 값을 이 파일에 하드코딩하지 않는다 — 파이썬 `round()` 자신이 각 실행마다
 정답을 새로 만든다, 아래 참조). `node` 가 없는 환경에서는 그 절만 skip
 된다 — 상수 대조(위)는 node 없이도 그대로 돈다.
+
+**2026-08-21 추가**: 위 두 절(상수 대조·pyRound 대조)도 여전히 ordTickSize/
+ordFloorTick/ordCeilTick/ordAverage/ordPlan/ordTakeProfit/ordStopLoss 일곱
+함수 자신은 한 번도 실행하지 않는다 — "재료"(상수, 반올림 함수 하나)만
+검증했을 뿐이다. 감사가 확인한 세 가지 실측 뮤테이션(ordAverage 의
+pyRound→Math.round, ordCeilTick 의 올림→내림, ordTickSize 밴드 경계값 +1)이
+전부 이 일곱 함수를 직접 실행하지 않고서는 601개 스위트를 그대로 통과한다.
+이어지는 절이 그 간극을 메운다 — node vm 에서 이 일곱 함수를 직접 호출해
+scripts/orders.py 의 대응 함수와 값으로 대조한다.
 """
 from __future__ import annotations
 
 import json
+import math
 import pathlib
 import re
 import shutil
@@ -237,7 +247,6 @@ def test_검사기가_Math_round_퇴행을_잡는다():
 
     node 를 실제로 부르지 않는다(순수 파이썬 계산만 대조) — node 없는
     환경에서도 "검사기가 눈이 멀지 않았다"는 확인만은 계속 돌 수 있다."""
-    import math
     naive_half_up = [
         math.floor(x) + 1 if (x - math.floor(x)) >= 0.5 else math.floor(x)
         for x in _TIE_CASES
@@ -246,3 +255,203 @@ def test_검사기가_Math_round_퇴행을_잡는다():
     assert naive_half_up != py_results, (
         "이 파라미터 집합으로는 half-up 과 파이썬 round() 가 구분되지 않는다 — "
         "검사기가 눈이 먼 상태로 항상 통과할 위험이 있다.")
+
+
+# ── 7개 함수를 node vm 에서 직접 실행해 orders.py 와 값으로 대조 ──────────
+#
+# 위 두 절(상수 대조, pyRound 홀짝 대조)은 app.js 의 "재료"만 검증한다 —
+# ordTickSize/ordFloorTick/ordCeilTick/ordAverage/ordPlan/ordTakeProfit/
+# ordStopLoss 자신은 이 파일에서 한 번도 실행되지 않았다. 감사가 확인한
+# 세 가지 실측 뮤테이션이 전부 이 절 없이는 601개 스위트를 그대로 통과한다:
+#
+#   1. ordAverage 의 pyRound → Math.round: fills=[500, 501] 에서 익절선이
+#      526 → 528 로 바뀐다(500원짜리 종목 — 평균 500.5 가 반내림/반올림에
+#      따라 500/501 로 갈린다).
+#   2. ordCeilTick 의 올림 → 내림: 호가단위에 안 맞는 값마다 익절선/손절선이
+#      반대 방향으로 반올림된다.
+#   3. ordTickSize 의 밴드 경계값 +1: 그 경계 바로 위 가격의 호가단위가
+#      통째로 바뀐다.
+#
+# 아래 PLAN_FIRST_PRICES/FILLS_PROBES/TICK_PROBE_PRICES 는 이 세 사고를
+# 전부 재현하도록 일부러 골랐다 — 그리고 그 아래 self-test 들이 "이 probe
+# 가 실제로 저 사고들에 반응하는가"를 node 없이 미리 확인한다(검사기 자신이
+# 눈멀지 않았다는 확인, 위 test_검사기가_Math_round_퇴행을_잡는다 와 같은 원칙).
+
+_BAND_BOUNDARIES = [b for b, _ in orders._TICKS]   # 2000, 5000, 20000, 50000, 200000, 500000
+
+TICK_PROBE_PRICES = sorted({
+    # 각 경계의 양쪽 — tick_size 판정 자체와, ceil 이 밴드를 넘는 경우
+    # (test_orders.py 의 "올림이 밴드 경계를 넘어도" 절과 같은 값들) 둘 다
+    # 여기서 나온다.
+    *(b + d for b in _BAND_BOUNDARIES for d in (-1, 0, 1)),
+    # 각 밴드 내부, 일부러 그 밴드 호가단위에 안 맞는 값 — floor/ceil 이
+    # 실제로 갈라지는 지점이 probe 안에 있어야 ceil↔floor 뮤테이션이 드러난다.
+    1524, 3202, 13755, 32270, 115830, 247530, 2987030,
+    232650, 260617,   # 삼성전자 실측 사다리/익절선의 원시(반올림 전) 값
+})
+
+# plan() 이 무너지는 저가 영역(orders.py plan() 독스트링: 40원 이하에서
+# 손절선<3차가 부등식이 깨진다) + 홀짝 경계 tie(75원: 75×0.94=70.5, 밑이
+# 짝수 — Math.round 라면 71) + 평범한 값들.
+PLAN_FIRST_PRICES = [
+    8, 9, 12, 13, 40, 41, 42, 50,   # 저가 붕괴 구간
+    75,                              # buy2 tie: 70.5(밑 70, 짝수)
+    100, 1401, 1524, 13750, 32250,
+    100000, 115800, 247500, 500000, 2987000,
+]
+
+# average/take_profit/stop_loss 용 fills. 감사 보고서가 지목한 tie 세 개를
+# 명시적으로 포함한다(500×1.053=526.5, 1500×1.053=1579.5, 1650×0.91=1501.5
+# — 전부 밑이 짝수라 파이썬 banker's rounding 과 half-up 이 갈린다).
+FILLS_PROBES = [
+    [500, 501],           # 평균 500.5(짝수 500) — ordAverage 뮤테이션 재현(526→528)
+    [1500],               # take_profit tie
+    [1650, 1650, 1650],   # stop_loss tie
+    [300, 200],
+    [100000],
+    [100000, 94000],
+    [100000, 94000, 88000],
+    [100000, 94000, 88002],
+    [247500],
+]
+for _first in PLAN_FIRST_PRICES:
+    _p = orders.plan(_first)
+    FILLS_PROBES.append([_first])
+    FILLS_PROBES.append([_first, _p["buy2"]])
+    FILLS_PROBES.append([_first, _p["buy2"], _p["buy3"]])
+
+_FN_PY = {
+    "ordTickSize": orders.tick_size,
+    "ordFloorTick": orders.floor_tick,
+    "ordCeilTick": orders.ceil_tick,
+    "ordAverage": orders.average,
+    "ordPlan": orders.plan,
+    "ordTakeProfit": orders.take_profit,
+    "ordStopLoss": orders.stop_loss,
+}
+
+
+def _build_probe_spec() -> list[dict]:
+    spec = []
+    for price in TICK_PROBE_PRICES:
+        spec.append({"fn": "ordTickSize", "args": [price]})
+        spec.append({"fn": "ordFloorTick", "args": [price]})
+        spec.append({"fn": "ordCeilTick", "args": [price]})
+    for first in PLAN_FIRST_PRICES:
+        spec.append({"fn": "ordPlan", "args": [first]})
+    for fills in FILLS_PROBES:
+        spec.append({"fn": "ordAverage", "args": [fills]})
+        spec.append({"fn": "ordTakeProfit", "args": [fills]})
+        spec.append({"fn": "ordStopLoss", "args": [fills]})
+    return spec
+
+
+def _run_node_orders(spec: list[dict]) -> list:
+    """app.js 를 node vm 컨텍스트에서 로드하고 spec 의 각 호출을 그대로
+    실행한다. spec 항목은 {"fn": "ordPlan", "args": [100000]} 형태 — fn 은
+    app.js 최상위에 선언된 함수 이름 그대로다(_run_node_pyround 와 같은
+    통과 커튼 스텁을 그대로 쓴다)."""
+    app_js_path = json.dumps(str(APP_JS))
+    spec_json = json.dumps(spec)
+    script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync({app_js_path}, 'utf8');
+const el = () => ({{ addEventListener(){{}}, dataset: {{}} }});
+const sandbox = {{
+  console,
+  document: {{ getElementById: () => el(), querySelector: () => null,
+               querySelectorAll: () => [], createElement: () => el() }},
+  window: {{ addEventListener(){{}} }},
+  localStorage: {{ getItem: () => null, setItem(){{}} }},
+  CSS: {{ escape: (s) => s }},
+}};
+vm.createContext(sandbox);
+try {{ vm.runInContext(src, sandbox); }} catch (e) {{ /* 통과 커튼 배선 실패는 무시 */ }}
+const REQUIRED = ["ordTickSize", "ordFloorTick", "ordCeilTick", "ordAverage",
+                   "ordPlan", "ordTakeProfit", "ordStopLoss"];
+for (const name of REQUIRED) {{
+  if (typeof sandbox[name] !== "function") {{
+    console.error("MISSING_" + name);
+    process.exit(1);
+  }}
+}}
+const spec = {spec_json};
+const results = spec.map(c => sandbox[c.fn](...c.args));
+console.log(JSON.stringify(results));
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, (
+        f"node 실행이 실패했다(app.js 에서 주문 함수 중 하나를 못 찾았을 수 있다):\n{result.stderr}")
+    return json.loads(result.stdout)
+
+
+@_SKIP_NO_NODE
+def test_7개_주문_함수가_orders_py와_probe_전체에서_일치한다():
+    """ordTickSize/ordFloorTick/ordCeilTick/ordAverage/ordPlan/ordTakeProfit/
+    ordStopLoss 를 실제로 node 에서 실행해 scripts/orders.py 의 대응 함수와
+    값으로 대조한다 — 위 상수 대조·pyRound 대조와 달리 이 함수들 자신은
+    지금까지 이 파일에서 한 번도 호출되지 않았다."""
+    spec = _build_probe_spec()
+    js_results = _run_node_orders(spec)
+    assert len(js_results) == len(spec)
+    mismatches = []
+    for case, js_val in zip(spec, js_results):
+        py_val = _FN_PY[case["fn"]](*case["args"])
+        if py_val != js_val:
+            mismatches.append((case, py_val, js_val))
+    print(f"[test_js_orders_sync] 7개 함수 probe {len(spec)}건 실행 - "
+          f"불일치 {len(mismatches)}건")
+    assert not mismatches, (
+        f"app.js 의 주문 계산 함수가 scripts/orders.py 와 어긋났다"
+        f"(probe {len(spec)}건 중 {len(mismatches)}건 불일치):\n" +
+        "\n".join(f"  {c['fn']}{c['args']} → python={p!r}, js={j!r}"
+                  for c, p, j in mismatches[:20]) +
+        ("\n  (처음 20건만 표시)" if len(mismatches) > 20 else "") +
+        "\n두 구현이 갈리면 화면이 절대 그 가격에 체결되지 않을 숫자를 "
+        "자신 있게 보여준다 — 어느 쪽을 고쳤든 반드시 같이 맞출 것.")
+
+
+# ── 위 probe 가 실제로 감사의 세 뮤테이션에 반응하는지 미리 확인 ──────────
+# node 를 부르지 않는다 — probe 데이터 자체의 성질만 파이썬으로 확인한다.
+# 이러면 node 없는 환경에서도 "이 probe 가 눈멀지 않았다"는 확인만은 계속
+# 돈다(pyRound 절의 test_검사기가_Math_round_퇴행을_잡는다 와 같은 원칙).
+
+def test_probe가_ordAverage_뮤테이션에_반응한다():
+    """fills=[500, 501] 의 평균이 반올림 방식에 따라 실제로 갈리는지 확인
+    — 아니면 위 종합 비교가 감사 보고서의 526→528 사고를 재현하지 못한 채
+    우연히 통과할 수 있다."""
+    v = (500 + 501) / 2   # 500.5
+    naive_half_up = math.floor(v) + 1   # Math.round(500.5) == 501
+    assert naive_half_up != orders.average([500, 501])
+
+
+def test_probe가_ordPlan_뮤테이션에_반응한다():
+    """first_price=75 의 buy2(70.5 tie)가 반올림 방식에 따라 실제로 갈리는지
+    확인."""
+    v = 75 * orders.BUY2_RATIO   # 70.5
+    naive_half_up = math.floor(v) + 1   # Math.round(70.5) == 71
+    assert naive_half_up != orders.plan(75)["buy2"]
+
+
+def test_probe가_ceil_floor_뮤테이션에_반응한다():
+    """TICK_PROBE_PRICES 안에 floor_tick 과 ceil_tick 결과가 실제로 다른
+    값이 있는지 확인 — 전부 우연히 이미 호가단위에 맞아떨어지는 값만
+    골랐다면 ceil↔floor 뮤테이션이 안 잡힌다."""
+    diffs = [p for p in TICK_PROBE_PRICES if orders.ceil_tick(p) != orders.floor_tick(p)]
+    assert diffs, "probe 가격 전부가 이미 호가단위에 맞아떨어져 ceil/floor 차이가 안 드러난다"
+
+
+def test_probe가_밴드_경계_플러스원_뮤테이션에_반응한다():
+    """_TICKS 의 밴드 경계값을 전부 +1 해도 tick_size 판정이 실제로 달라지는
+    probe 가 있는지 확인."""
+    mutated = tuple((b + 1, t) for b, t in orders._TICKS)
+
+    def mutated_tick_size(price):
+        for upper, t in mutated:
+            if price < upper:
+                return t
+        return orders._TICK_TOP
+
+    diffs = [p for p in TICK_PROBE_PRICES if mutated_tick_size(p) != orders.tick_size(p)]
+    assert diffs, "probe 가격이 밴드 경계 +1 변화에 전혀 반응하지 않는다"

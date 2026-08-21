@@ -47,6 +47,26 @@
    "signal_date": null,
    "source": "수동",
    "status": "open"
+  },
+  {
+   "adjustments": [],
+   "auto": true,
+   "buys": [],
+   "code": "483650",
+   "exits": [],
+   "id": "20260821-483650",
+   "memo": "",
+   "name": "달바글로벌",
+   "observed_at": null,
+   "orders": {},
+   "signal_date": null,
+   "source": "수동",
+   "status": "pending",
+   "watch": {
+    "date": "2026-08-21",
+    "days": 5,
+    "price": 250000
+   }
   }
  ],
  "schema": 1

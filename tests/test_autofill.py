@@ -170,7 +170,7 @@ def test_체결되면_positions에_쓴다(monkeypatch):
     assert p["exits"][0]["price"] == 105300
 
 
-def test_안_닿으면_분봉을_요청하지도_쓰지도_않는다(monkeypatch):
+def test_안_닿으면_분봉을_요청하지도_쓰지도_않는다(monkeypatch, capsys):
     calls = []
     fake = FakeGH(_state())
     monkeypatch.setattr(autofill, "gh", fake)
@@ -181,6 +181,9 @@ def test_안_닿으면_분봉을_요청하지도_쓰지도_않는다(monkeypatch
     assert rc == 0
     assert calls == []
     assert fake.writes == []
+    # 결함4: 정상 무터치는 조용해야 한다 — 매번 나는 일까지 로그로 찍으면
+    # 진짜 봐야 할 신호(판정 불가·불일치)가 소음에 묻힌다.
+    assert "[경고]" not in capsys.readouterr().out
 
 
 def test_이미_그날_체결된_구간은_다시_재생하지_않는다(monkeypatch):
@@ -299,7 +302,7 @@ def test_지정가에_닿으면_체결하고_같은_실행에서_사다리까지
     assert p["observed_at"] == "2026-08-21T09:31"
 
 
-def test_지정가에_안_닿으면_pending_그대로다(monkeypatch):
+def test_지정가에_안_닿으면_pending_그대로다(monkeypatch, capsys):
     calls = []
     fake = FakeGH({"schema": 1, "positions": [_pending()]})
     monkeypatch.setattr(autofill, "gh", fake)
@@ -310,6 +313,8 @@ def test_지정가에_안_닿으면_pending_그대로다(monkeypatch):
     assert rc == 0
     assert calls == [], "일봉 저가가 목표가 위인데 분봉을 받았다"
     assert fake.writes == []
+    # 결함4: 정상 무터치는 조용해야 한다.
+    assert "[경고]" not in capsys.readouterr().out
 
 
 def test_예외_지정된_pending_은_체결되지_않는다(monkeypatch):
@@ -429,7 +434,7 @@ def test_만료_쓰기_실패는_종료코드에_반영된다(monkeypatch):
     assert rc == 1
 
 
-def test_대기_종목의_일봉이_없으면_자동매수가_안_걸린다(monkeypatch):
+def test_대기_종목의_일봉이_없으면_자동매수가_안_걸린다(monkeypatch, capsys):
     """close.py 가 대기 종목의 일봉을 안 받아오던 실측 사고(2026-08-21)를
     못박는다. bars 에 그 코드가 없으면 run() 은 `bar is None` 으로 조용히
     건너뛴다 — 오류도, 경고도 없이 **자동매수가 영영 안 걸린다.**
@@ -437,6 +442,10 @@ def test_대기_종목의_일봉이_없으면_자동매수가_안_걸린다(monk
     이 테스트는 "일봉이 없으면 안 걸린다"는 사실 자체를 고정한다. 그래서
     close.py 가 quotes.live_codes 로 대기 종목까지 받아오는 것이 왜
     필수인지가 코드로 남는다.
+
+    결함4(2026-08-21 감사): 지금은 이 상황이 더 이상 "조용히" 안 걸리지
+    않는다 — "판정 불가"를 로그로 남긴다. 바로 이 모양의 결손(일봉이
+    안 온 것)이 이 기능의 수명 내내 안 들켰던 이유이기도 하다.
     """
     fake = FakeGH({"schema": 1, "positions": [_pending()]})
     monkeypatch.setattr(autofill, "gh", fake)
@@ -448,6 +457,9 @@ def test_대기_종목의_일봉이_없으면_자동매수가_안_걸린다(monk
     assert rc == 0
     assert fake.writes == [], "일봉이 없는데 체결됐다"
     assert fake.state["positions"][0]["status"] == "pending"
+    out = capsys.readouterr().out
+    assert "일봉 없음" in out
+    assert "005930" in out
 
 
 def test_대기_종목의_일봉이_있으면_자동매수가_걸린다(monkeypatch):
@@ -462,3 +474,211 @@ def test_대기_종목의_일봉이_있으면_자동매수가_걸린다(monkeypa
                       "2026-08-21", ["2026-08-20", "2026-08-21"])
     assert rc == 0
     assert fake.state["positions"][0]["status"] == "open"
+
+
+# ── 결함1(2026-08-21 감사): 등록일 당일은 소급 체결되지 않는다 ───────────
+#
+# 실측: 2026-08-21T15:41 KST 에 등록된 워치(7900원)가 같은 날 09:00
+# 분봉으로 체결됐다 — 등록보다 6시간 41분 앞선 시각이다. watch_deadline()
+# 은 이미 등록일 당일을 안 세고 다음 거래일부터 만료 기한을 센다 — 체결
+# 판정도 같은 기준(다음 거래일부터)을 써야 두 절반이 어긋나지 않는다.
+
+
+def test_등록일_당일에는_체결되지_않는다(monkeypatch, capsys):
+    """워치는 장 마감 뒤에 등록되므로, 등록일 당일의 분봉은 그 워치가
+    존재하기 전 시각이다. 등록일 당일 저가가 목표가 밑으로 찍혀도 그건
+    소급 체결이다 — 실측 재현: 같은 날 09:00 분봉으로 15:41 등록 워치가
+    체결됐었다."""
+    calls = []
+    fake = FakeGH({"schema": 1, "positions": [_pending()]})   # watch.date=2026-08-20
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute",
+                        lambda code, day: calls.append(code) or [
+                            {"t": "202608200900", "high": 241000, "low": 239000}])
+    rc = autofill.run({"005930": {"20260820": {"high": 245000, "low": 239000}}},
+                      "2026-08-20", CAL)   # day == watch.date — 등록일 당일
+    assert rc == 0
+    assert calls == [], "등록일 당일인데 분봉을 요청했다 — 체결 판정 자체를 하면 안 된다"
+    assert fake.writes == []
+    assert fake.state["positions"][0]["status"] == "pending"
+    # 등록일 당일 스킵은 거의 매일 벌어지는 정상 상황이다(스크리너가 전부
+    # 장 마감 후에 등록하므로) — 조용해야 한다(결함4 원칙과 같다).
+    assert "[경고]" not in capsys.readouterr().out
+
+
+def test_등록일_다음_거래일부터는_정상_체결된다(monkeypatch):
+    """위 테스트의 짝 — 다음 거래일부터는 정상적으로 체결된다."""
+    fake = FakeGH({"schema": 1, "positions": [_pending()]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute", lambda code, day: [
+        {"t": "202608210931", "high": 241000, "low": 239000}])
+    rc = autofill.run({"005930": {"20260821": {"high": 245000, "low": 239000}}},
+                      "2026-08-21", CAL)   # CAL[1] — 등록일(20일) 다음 거래일
+    assert rc == 0
+    assert fake.state["positions"][0]["status"] == "open"
+
+
+# ── 결함2(2026-08-21 감사): 분봉 창(약 7거래일)을 넘긴 날은 일봉만으로 확정 ──
+#
+# naver.fetch_minute 은 최근 약 7거래일만 응답한다 — 그보다 오래된 날짜는
+# 영구히 빈 응답이다(재시도로 해결 안 됨). 캐치업이 그 창을 넘긴 날짜를
+# 처리해야 할 때, 일봉 하나를 "분봉 하나"처럼 재생해 확정하고
+# minute_verified=False 를 남긴다(설계 §9).
+
+DAYS10 = ["2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23", "2026-07-24",
+          "2026-07-27", "2026-07-28", "2026-07-29", "2026-07-30", "2026-07-31"]
+
+
+def test_분봉_창을_넘긴_날은_사다리_체결도_일봉만으로_확정한다(monkeypatch):
+    """분봉 창(약 7거래일)을 넘긴 날짜는 fetch_minute 을 시도조차 하지
+    않는다 — 시도해도 영구히 빈 응답이라 헛수고다. 일봉 OHLC 를 그대로
+    재생해 체결을 확정하고, minute_verified=False 를 남긴다."""
+    p = _pos(observed_at="2026-07-19T15:30",
+             buys=[{"date": "2026-07-19", "price": 100000}])
+    fake = FakeGH({"schema": 1, "positions": [p]})
+    monkeypatch.setattr(autofill, "gh", fake)
+
+    def boom(code, day):
+        raise AssertionError("분봉 창 밖인데 fetch_minute 을 호출했다")
+    monkeypatch.setattr(autofill.naver, "fetch_minute", boom)
+
+    day = DAYS10[0]   # days_list 끝(DAYS10[-1])으로부터 9거래일 전 — 창 밖
+    key = day.replace("-", "")
+    rc = autofill.run({"005930": {key: {"high": 106000, "low": 99000}}}, day, DAYS10)
+    assert rc == 0
+    assert len(fake.writes) == 1
+    exit_rec = fake.writes[0][1]["positions"][0]["exits"][0]
+    assert exit_rec["reason"] == "자동익절"
+    assert exit_rec["minute_verified"] is False
+
+
+def test_분봉_창을_넘긴_대기_체결도_일봉만으로_확정된다(monkeypatch):
+    """pending 루프도 같은 창 규칙을 따른다 — 그러지 않으면 캐치업이 오래
+    밀린 대기 종목은 체결 증거(일봉 저가)가 있어도 계속 pending 으로
+    남다가 결국 (틀리게) 만료된다."""
+    watch_date = DAYS10[0]
+    day = DAYS10[1]     # days_list 끝으로부터 8거래일 전 — 창 밖. 등록일(0) 다음날.
+    key = day.replace("-", "")
+    p = _pending(watch={"price": 240000, "date": watch_date, "days": 5})
+    fake = FakeGH({"schema": 1, "positions": [p]})
+    monkeypatch.setattr(autofill, "gh", fake)
+
+    def boom(code, d):
+        raise AssertionError("분봉 창 밖인데 fetch_minute 을 호출했다")
+    monkeypatch.setattr(autofill.naver, "fetch_minute", boom)
+
+    rc = autofill.run({"005930": {key: {"high": 245000, "low": 239000}}}, day, DAYS10)
+    assert rc == 0
+    pos = fake.state["positions"][0]
+    assert pos["status"] == "open"
+    assert pos["buys"][0]["price"] == 240000
+    assert pos["buys"][0]["t"] == f"{key}1530"
+
+
+def test_캐치업_날짜를_두_번_처리해도_since_가드가_중복을_막는다(monkeypatch):
+    """결함2 핵심 요구사항: 캐치업이 우연히 같은(오늘이 아닌) 날짜를 두 번
+    처리해도(재시도 등) 안전해야 한다. 첫 호출이 buy2 를 체결시킨 뒤에도
+    그날 일봉 고가는 (내려간) 익절선을 여전히 넘는다 — touched() 필터만
+    으로는 두 번째 호출을 못 막는다. 실제 방어는 since_for() 다(모듈
+    독스트링의 "하루 두 번 도는 cron" 사고와 메커니즘이 같다 — 여기서는
+    "캐치업 재처리"라는 다른 문맥에서 같은 가드를 확인한다)."""
+    p = _pos(observed_at="2026-08-18T15:30",
+             buys=[{"date": "2026-08-18", "price": 100000}])
+    fake = FakeGH({"schema": 1, "positions": [p]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute", lambda code, day: [
+        {"t": "202608190900", "high": 101000, "low": 100000},
+        {"t": "202608190930", "high": 103000, "low": 101000},
+        {"t": "202608191000", "high": 99000, "low": 94000},
+        {"t": "202608191530", "high": 95000, "low": 94000},
+    ])
+    day = "2026-08-19"
+    bars = {"005930": {"20260819": {"high": 103000, "low": 94000}}}
+
+    rc1 = autofill.run(bars, day, [])
+    assert rc1 == 0
+    assert len(fake.writes) == 1
+    pos = fake.state["positions"][0]
+    assert len(pos["buys"]) == 2 and pos["buys"][1]["t"] == "202608191000"
+
+    rc2 = autofill.run(bars, day, [])
+    assert rc2 == 0
+    assert len(fake.writes) == 1, "같은 날짜를 다시 처리했는데 추가 체결이 났다"
+
+
+def test_놓친_날을_캐치업으로_처리하면_그때_체결된다(monkeypatch):
+    """결함2: close.main() 이 이제 놓친 거래일도 그 날짜 그대로 autofill.run
+    에 넘긴다(test_close.py 의 통합 테스트 참조) — 여기서는 autofill.run
+    자체가 "오늘"이 아닌 날짜를 받아도 정상적으로 그 날의 체결을 확정하는지
+    본다. 2026-08-20 에 진짜로 체결됐어야 할 워치가 cron 이 그날을 건너뛰어
+    2026-08-21 에야(캐치업으로 정확히 그 날짜를 받아) 처리되는 상황이다."""
+    fake = FakeGH({"schema": 1, "positions": [_pending()]})   # watch.date=2026-08-20
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute", lambda code, day: [
+        {"t": f"{day.replace('-', '')}0931", "high": 241000, "low": 239000}])
+
+    missed_day = "2026-08-21"   # 진짜 체결일 — cron 이 이 날을 건너뛰었다
+    rc = autofill.run({"005930": {"20260821": {"high": 245000, "low": 239000}}},
+                      missed_day, CAL)
+    assert rc == 0
+    pos = fake.state["positions"][0]
+    assert pos["status"] == "open", "놓친 날을 그 날짜 그대로 캐치업 처리했는데 체결되지 않았다"
+    assert pos["buys"][0]["date"] == missed_day
+
+
+# ── 결함3(2026-08-21 감사): 손편집된 pending+orders 는 격리되어 크래시하지 않는다 ──
+
+
+def test_손편집된_orders를_가진_pending_기록은_크래시_없이_격리된다(monkeypatch, capsys):
+    """pending 기록(buys=[])에 orders 사다리가 손편집으로 붙어 있으면,
+    candidates()/touched() 까지 도달했을 때 orders.take_profit([]) →
+    orders.average([]) 의 ValueError 가 close.main() 밖으로 새어나갔다
+    (감사가 end-to-end 로 재현). models.normalize() 가 이 모양(buys 비고
+    orders 참) 자체를 격리하도록 고쳤다 — positions.json 전체가(기존
+    관례대로, run() 상단의 `if bad:` 게이트) 그날은 쓰기를 건너뛰지만,
+    최소한 크래시는 없다."""
+    bad = _pending(orders={"buy2": 94000, "buy3": 88000, "customized": False})
+    fake = FakeGH({"schema": 1, "positions": [bad]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    calls = []
+    monkeypatch.setattr(autofill.naver, "fetch_minute",
+                        lambda code, day: calls.append(code) or [])
+    rc = autofill.run({"005930": {"20260821": {"high": 300000, "low": 200000}}},
+                      "2026-08-21", CAL)
+    assert rc == 0
+    assert fake.writes == []
+    assert calls == [], "손상 항목이 있으면 판정 자체를 시도하면 안 된다(전체 스킵)"
+    out = capsys.readouterr().out
+    assert "중단" in out
+
+
+# ── 결함4(2026-08-21 감사): "판정 불가"와 "안 닿음"을 구분해 로그로 남긴다 ──
+
+
+def test_사다리_대상_기록의_일봉이_없으면_판정_불가로_로그를_남긴다(monkeypatch, capsys):
+    """candidates() 루프(이미 산 기록)도 pending 루프와 같은 구분이
+    필요하다 — bar is None 은 "안 닿음"이 아니다."""
+    fake = FakeGH(_state())
+    monkeypatch.setattr(autofill, "gh", fake)
+    rc = autofill.run({}, "2026-08-20", [])   # 005930 의 일봉 자체가 없음
+    assert rc == 0
+    assert fake.writes == []
+    out = capsys.readouterr().out
+    assert "일봉 없음" in out
+    assert "005930" in out
+
+
+def test_일봉_저가가_목표가에_닿았는데_분봉에서_확인_안되면_불일치를_로그로_남긴다(monkeypatch, capsys):
+    """일봉이 이미 "닿았다"를 증명했는데(bar["low"] <= watch["price"]) 분봉
+    어디에도 그 가격이 없으면, 두 데이터 출처가 모순된다 — 조용히 넘기면
+    이 모순 자체가 사라진다."""
+    fake = FakeGH({"schema": 1, "positions": [_pending()]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute", lambda code, day: [
+        {"t": "202608210931", "high": 245000, "low": 241000}])   # 240,000 을 아무 분봉도 못 찍음
+    rc = autofill.run({"005930": {"20260821": {"high": 245000, "low": 239000}}},
+                      "2026-08-21", CAL)
+    assert rc == 0
+    assert fake.writes == []
+    out = capsys.readouterr().out
+    assert "불일치" in out

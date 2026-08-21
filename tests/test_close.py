@@ -869,3 +869,86 @@ def test_종결_종목의_일봉은_안_받는다(monkeypatch):
     monkeypatch.setattr(close.autofill, "run", lambda *a, **k: 0)
     close.main()
     assert [c for c in 요청된 if c not in _지수_bars] == []
+
+
+# ── 결함2(2026-08-21 감사): 놓친 거래일을 캐치업한다 ──────────────────────
+#
+# 예전엔 close.main() 이 latest(오늘) 하루만 autofill.run 에 넘겼다 — cron
+# 이 하루를 통째로 드롭하거나(모듈 독스트링) fetch_failed 로 하루를
+# 건너뛰면, 그날 체결은 영영 안 잡혔다. 이제는 todo(백필 대상 — 이미
+# missing_days 로 구한, 오름차순=오래된 순, WINDOW=30거래일로 유계인
+# 목록)를 재사용해 놓친 날짜도 각각 따로 넘긴다.
+
+
+def test_자동체결은_missing_history_날짜를_전부_오래된_순으로_처리한다(monkeypatch):
+    """실측 사고(2026-08-21): cron 이 하루를 드롭하면 그날 체결은 close.py
+    가 latest 만 보는 한 영원히 안 잡혔다. todo(위에서 이미 계산해둔 백필
+    대상)를 재사용해 놓친 날짜 전부를 오래된 순으로 처리해야 한다."""
+    called = []
+    기존_history = [f"{d}.json" for d in ALL_DAYS[-30:-3]]   # 마지막 3일 백필 대상
+    _기본_준비(monkeypatch, 기존_history=기존_history, write_capture=[])
+    monkeypatch.setattr(close.autofill, "run",
+                        lambda bars, day, days: called.append(day) or 0)
+
+    rc = close.main()
+
+    assert rc == 0
+    assert called == [ALL_DAYS[-3], ALL_DAYS[-2], ALL_DAYS[-1]], (
+        "오래된 순으로, 놓친 날 전부를 처리해야 한다")
+
+
+def test_메울_날짜가_없으면_자동체결은_latest_하루만_처리한다(monkeypatch):
+    """정상적인(cron 이 안 밀린) 하루 — todo 가 비어도 latest 는 항상
+    처리해야 한다(기존 동작과 같다)."""
+    called = []
+    _기본_준비(monkeypatch,
+             기존_history=[f"{d}.json" for d in ALL_DAYS[-30:]],  # 백필 대상 없음
+             write_capture=[])
+    monkeypatch.setattr(close.autofill, "run",
+                        lambda bars, day, days: called.append(day) or 0)
+
+    rc = close.main()
+
+    assert rc == 0
+    assert called == [ALL_DAYS[-1]]
+
+
+def test_history_목록_실패해도_latest는_자동체결_대상에서_빠지지_않는다(monkeypatch):
+    """gh.list_dir 실패로 todo=[] 가 되더라도(위 리뷰 8번, F1) 오늘(latest)
+    의 자동 체결까지 같이 굶으면 안 된다 — 최소한 latest 는 항상 처리한다
+    (todo 가 비어있는 두 이유 — "정말 다 있음"과 "목록을 몰라서 모름" —
+    를 구분 못 하면 후자에서도 아무것도 안 처리하는 조용한 퇴행이 생긴다)."""
+    called = []
+    _기본_준비(monkeypatch, write_capture=[])
+
+    def 깨진_목록(path):
+        raise RuntimeError("GET .../contents/history -> 502: Bad Gateway")
+    monkeypatch.setattr(close.gh, "list_dir", 깨진_목록)
+    monkeypatch.setattr(close.autofill, "run",
+                        lambda bars, day, days: called.append(day) or 0)
+
+    rc = close.main()
+
+    assert rc == 0
+    assert called == [ALL_DAYS[-1]]
+
+
+def test_특정_날짜의_자동체결_실패가_다른_날짜_처리를_막지_않는다(monkeypatch):
+    """하루치 캐치업 실패(예: 그날 기록의 409 충돌)가 나머지 날짜의 처리를
+    막으면 안 된다 — history 백필 개별 실패를 감싸는 것과 같은 원칙이다.
+    실패가 있었다는 사실 자체는 rc=1 로 드러나야 한다."""
+    called = []
+    기존_history = [f"{d}.json" for d in ALL_DAYS[-30:-3]]   # 마지막 3일 백필 대상
+    _기본_준비(monkeypatch, 기존_history=기존_history, write_capture=[])
+
+    def 가짜_run(bars, day, days):
+        called.append(day)
+        return 1 if day == ALL_DAYS[-2] else 0
+
+    monkeypatch.setattr(close.autofill, "run", 가짜_run)
+
+    rc = close.main()
+
+    assert rc == 1
+    assert called == [ALL_DAYS[-3], ALL_DAYS[-2], ALL_DAYS[-1]], (
+        "한 날짜가 실패해도 나머지 날짜는 계속 처리해야 한다")

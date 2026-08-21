@@ -32,7 +32,7 @@ SALT_RE = re.compile(r'^const GATE_PBKDF2_SALT = new TextEncoder\(\)\.encode\("(
 ITER_RE = re.compile(r'^const GATE_PBKDF2_ITERATIONS = (\d+);', re.M)
 
 # 2026-08-20 배포 시점에 확정된 값. 해시는 이 둘에 묶여 있다.
-EXPECTED_SALT = "mouigosa-gate-salt-v1"
+EXPECTED_SALT = "aegis-gate-salt-v1"
 EXPECTED_ITERATIONS = 600000
 
 

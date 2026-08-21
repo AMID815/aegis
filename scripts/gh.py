@@ -4,12 +4,12 @@
 **Contents API PUT 만 쓴다.** 항상 현재 head 위에 커밋을 얹으므로 브랜치를
 되감을 수 없다 — git push --force 나 reset 재시도로 기록이 사라지는 경로가 없다.
 
-⚠ `REPO` 의 기본값(AMID815/mouigosa)은 **실제 운영 저장소**다. `GITHUB_TOKEN`
+⚠ `REPO` 의 기본값(AMID815/aegis)은 **실제 운영 저장소**다. `GITHUB_TOKEN`
 이 로컬 환경에 설정된 채로 이 모듈을 실행하면(예: 개발 PC에서 `python -m
 scripts.close`) 진짜 저장소에 쓴다 — 지금 이걸 막는 유일한 방지선은 사용자가
 로컬에 PAT 를 두지 않아서 `_token()` 이 먼저 RuntimeError 를 내는 것뿐이다.
 
-실측 메모(2026-08-19, AMID815/mouigosa `data` 브랜치, 스크래치 커밋 후 삭제로
+실측 메모(2026-08-19, AMID815/aegis `data` 브랜치, 스크래치 커밋 후 삭제로
 확인 — 자세한 절차는 Task 5 구현 커밋 메시지 참조):
 
 - **author 기본값**: `committer` 만 주고 `author` 를 생략하면, GitHub 는
@@ -74,10 +74,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-REPO = os.environ.get("GITHUB_REPOSITORY", "AMID815/mouigosa")
+REPO = os.environ.get("GITHUB_REPOSITORY", "AMID815/aegis")
 BRANCH = os.environ.get("DATA_BRANCH", "data")
 API = "https://api.github.com"
-COMMITTER = {"name": "mouigosa-bot",
+COMMITTER = {"name": "aegis-bot",
              "email": "41898282+github-actions[bot]@users.noreply.github.com"}
 
 POSITIONS = "positions.json"

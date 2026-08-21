@@ -1,7 +1,7 @@
 # 모의고사 쓰기 프록시 — 배포 가이드
 
 이 폴더의 `worker.js` 는 [Cloudflare Workers](https://workers.cloudflare.com/) 위에서
-돈다. 하는 일은 딱 하나 — 페이지가 보낸 패스프레이즈를 확인하고, 맞으면 `mouigosa`
+돈다. 하는 일은 딱 하나 — 페이지가 보낸 패스프레이즈를 확인하고, 맞으면 `aegis`
 저장소에 깃허브 이슈를 하나 여는 것뿐이다. 그 다음(이슈 → `positions.json` 반영)은
 기존 `intake.yml`/`scripts/intake.py` 가 전혀 안 바뀐 채로 그대로 처리한다.
 
@@ -23,7 +23,7 @@ Cloudflare 를 한 번도 안 써봤다는 전제로 처음부터 적는다. 순
 - 무료 Cloudflare 계정 — <https://dash.cloudflare.com/sign-up> 에서 이메일로 가입.
   신용카드 필요 없음, Workers 무료 플랜으로 충분하다(하루 요청 수 한도가 이 앱의
   실제 사용량보다 훨씬 크다).
-- 이 저장소(`mouigosa`)에 대한 fine-grained PAT (아래 1단계에서 직접 만든다)
+- 이 저장소(`aegis`)에 대한 fine-grained PAT (아래 1단계에서 직접 만든다)
 
 ---
 
@@ -36,12 +36,12 @@ Cloudflare 를 한 번도 안 써봤다는 전제로 처음부터 적는다. 순
 1. 브라우저로 다음 주소를 연다(로그인된 계정이 `AMID815` 여야 한다):
    <https://github.com/settings/personal-access-tokens/new>
 2. 아래대로 채운다:
-   - **Token name**: `mouigosa-intake-worker` (아무 이름이나 되지만 나중에 알아보기
+   - **Token name**: `aegis-intake-worker` (아무 이름이나 되지만 나중에 알아보기
      쉽게)
    - **Expiration**: 원하는 기간(예: 1년). 만료되면 다시 만들어서
      `wrangler secret put GH_TOKEN` 을 다시 돌리면 된다.
    - **Resource owner**: `AMID815`
-   - **Repository access**: **Only select repositories** → `mouigosa` 하나만 선택
+   - **Repository access**: **Only select repositories** → `aegis` 하나만 선택
    - **Permissions → Repository permissions → Issues**: **Read and write** 로 바꾼다.
      **그 외 모든 권한은 전부 "No access" 로 남겨둔다** — 특히 **Contents 는
      반드시 No access** 여야 한다.
@@ -50,7 +50,7 @@ Cloudflare 를 한 번도 안 써봤다는 전제로 처음부터 적는다. 순
    `wrangler secret put` 으로 Cloudflare 안에만 넣는다.
 
 **확인**: 토큰을 만든 뒤 Settings → Developer settings → Personal access tokens →
-Fine-grained tokens 목록에서 `mouigosa-intake-worker` 를 클릭해 Permissions 가
+Fine-grained tokens 목록에서 `aegis-intake-worker` 를 클릭해 Permissions 가
 `Issues: Read and write` 하나뿐이고 `Contents` 가 없는지 다시 한번 본다.
 
 ---
@@ -64,7 +64,7 @@ Fine-grained tokens 목록에서 `mouigosa-intake-worker` 를 클릭해 Permissi
 ```
 python -c "import hashlib, unicodedata, getpass; \
 p = unicodedata.normalize('NFC', getpass.getpass('passphrase: ').strip()); \
-salt = b'mouigosa-gate-salt-v1'; \
+salt = b'aegis-gate-salt-v1'; \
 dk = hashlib.pbkdf2_hmac('sha256', p.encode('utf-8'), salt, 600000, dklen=32); \
 print(dk.hex())"
 ```
@@ -86,7 +86,7 @@ print(dk.hex())"
 저장소에 **영구히** 남는다 — 지워도 git 이력에 남고, 커밋을 되돌려도 GitHub 은
 과거 커밋을 계속 서빙한다. 반복횟수(600,000회)는 오프라인 대입 공격의 비용을
 SHA-256 한 번보다 약 60만 배 올리지만, 그래도 GPU 한 대가 초당 10억 회 안팎을
-시도한다고 보면 `mouigosa2026!` 류의 흔한 패턴은 몇 시간, 소문자+숫자 6자는
+시도한다고 보면 `aegis2026!` 류의 흔한 패턴은 몇 시간, 소문자+숫자 6자는
 GPU-일 단위로 뚫린다. 무작위로 고른 영어 단어 4개 이상(예: 사전에 없는 조합,
 `correct horse battery staple` 류)이면 이 비용이 GPU-년 단위 이상으로 뛴다 —
 반복횟수를 더 올리는 것보다 이쪽이 훨씬 효과가 크다.
@@ -112,8 +112,8 @@ npx wrangler deploy
 성공하면 마지막 줄에 배포된 주소가 나온다. 예:
 
 ```
-Published mouigosa-intake (x.xx sec)
-  https://mouigosa-intake.<계정서브도메인>.workers.dev
+Published aegis-intake (x.xx sec)
+  https://aegis-intake.<계정서브도메인>.workers.dev
 ```
 
 **이 URL을 기록해둔다** — 4단계에서 페이지 쪽에 붙여넣는다.

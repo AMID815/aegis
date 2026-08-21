@@ -154,8 +154,8 @@
 //     서버(autofill.run)가 하고, 이 값을 못 구해도(달력 범위 밖 등)
 //     조용히 "-"로 물러날 뿐 아무것도 막지 않는다.
 
-const RAW = "https://raw.githubusercontent.com/AMID815/mouigosa/data/";
-const REPO = "https://github.com/AMID815/mouigosa";
+const RAW = "https://raw.githubusercontent.com/AMID815/aegis/data/";
+const REPO = "https://github.com/AMID815/aegis";
 const STALE_MIN = 40;                // 30분 주기 + 여유 — 장중(is_final=false)에만 쓴다(항목 15)
 const STALE_CONFIRM_DAYS = 4;        // 확정 종가가 이보다 오래 그대로면 경보 — 주말+연휴 흡수용 여유
 
@@ -166,7 +166,7 @@ const STALE_CONFIRM_DAYS = 4;        // 확정 종가가 이보다 오래 그대
 // CSP 위반으로 실패한다 — tryWorker() 의 catch 가 이것도 네트워크 실패와
 // 똑같이 처리해 폴백으로 넘어가므로 사용자 경험은 안전하지만, 의도한 대로
 // Worker 를 쓰고 있는지는 README 4단계대로 두 곳 다 바꿨는지 확인해야 안다).
-const WORKER_URL = "https://mouigosa-intake.amid815.workers.dev";
+const WORKER_URL = "https://aegis-intake.amid815.workers.dev";
 
 // 이 자리표시자로 남아있는 동안은 fetch 자체를 시도하지 않는다 — 어차피
 // 실패할 요청을 매번 던져 콘솔에 오류만 쌓는 대신, "미설정"임을 바로
@@ -1885,7 +1885,7 @@ async function main() {
 // ══════════════════════════════════════════════════════════════════════
 //
 // positions.json 은 인증 없이 누구나 받을 수 있다(실측 2026-08-20):
-//   https://raw.githubusercontent.com/AMID815/mouigosa/data/positions.json
+//   https://raw.githubusercontent.com/AMID815/aegis/data/positions.json
 //   → HTTP 200, 인증 없음, 381바이트, 삼성전자/2026-08-19/247,500원/... 그대로.
 // GitHub Pages 를 진짜 비공개로 만들려면 Enterprise Cloud + 조직 계정이
 // 필요한데 여기엔 없다(설계 §9 와 같은 종류의 제약). 그래서 이 아래 코드가
@@ -1935,7 +1935,7 @@ async function main() {
 //
 // ── 유출 시 무슨 일이 생기나 (localStorage 겸용 저장의 트레이드오프) ──
 // §9 가 브라우저에 깃허브 토큰을 두지 않는 이유 — localStorage 는 경로가
-// 아니라 오리진 단위라 amid815.github.io 아래 mouigosa·황룡·눌림베팅·
+// 아니라 오리진 단위라 amid815.github.io 아래 aegis·황룡·눌림베팅·
 // 종가베팅·테마탐색구조대·오디세이가 같은 버킷을 쓴다 — 가 여기도 똑같이
 // 적용된다. 다른 점은 유출됐을 때의 결과다:
 //   - §9 가 막은 것(Contents:write 토큰)이 새면: main 브랜치의 app.js 를
@@ -1972,7 +1972,7 @@ async function main() {
 //
 //   python -c "import hashlib, unicodedata, getpass; \
 //   p = unicodedata.normalize('NFC', getpass.getpass('passphrase: ').strip()); \
-//   salt = b'mouigosa-gate-salt-v1'; \
+//   salt = b'aegis-gate-salt-v1'; \
 //   dk = hashlib.pbkdf2_hmac('sha256', p.encode('utf-8'), salt, 600000, dklen=32); \
 //   print(dk.hex())"
 //
@@ -1984,12 +1984,12 @@ async function main() {
 // 과 WebCrypto SubtleCrypto.deriveBits({name:"PBKDF2",...}) 가 같은 값을
 // 내는지 이 작업에서 교차 검증했다 — 같은 문구·소금·반복수로 두 쪽
 // 모두 27c44761...449635 로 일치했다.)
-const GATE_PBKDF2_HEX = "1ecc80828ee19c54a6cd9bb512ccf5cd64a2878ed3e7c9c5cd1b05518bf198af";
+const GATE_PBKDF2_HEX = "3b7b2b07d71d26863152a028dd9f1fc55468107451b104bd3d2874c9841338be";
 
 // 공개 상수 — 비밀이 아니다(위 "왜 PBKDF2인가" 참조). 문구를 바꾸지 않는
 // 한 이 소금과 반복수는 그대로 둔다 — 바꾸면 같은 문구도 다른 해시가
 // 나와 GATE_PBKDF2_HEX 를 다시 계산해야 한다.
-const GATE_PBKDF2_SALT = new TextEncoder().encode("mouigosa-gate-salt-v1");
+const GATE_PBKDF2_SALT = new TextEncoder().encode("aegis-gate-salt-v1");
 const GATE_PBKDF2_ITERATIONS = 600000;
 
 // 오리진 공유 버킷에서 다른 대시보드 키와 안 겹치게 접두어를 둔다(위
@@ -1999,7 +1999,7 @@ const GATE_PBKDF2_ITERATIONS = 600000;
 // 패스프레이즈로 바꾸므로, 실사용 기기가 옛 "_v1" 형태를 들고 있을 일이
 // 없다(배포된 적이 없다) — 그래도 의미 자체가 달라졌으니(불리언 →
 // 자격증명) 버전을 올려 혹시 모를 혼선을 원천 차단한다.
-const GATE_STORAGE_KEY = "mouigosa_gate_pass_v2";
+const GATE_STORAGE_KEY = "aegis_gate_pass_v1";
 
 function normalizePassphrase(raw) {
   // trim 먼저, NFC 정규화 나중 — 위 python 명령과 순서를 맞춘다(순서

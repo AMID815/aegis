@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """테스트 전역 안전장치 (리뷰 A4).
 
-`gh.py` 모듈 docstring 이 명시한다: `REPO` 의 기본값(AMID815/mouigosa)은
+`gh.py` 모듈 docstring 이 명시한다: `REPO` 의 기본값(AMID815/aegis)은
 **실제 운영 저장소**이고, 로컬 환경에 `GITHUB_TOKEN` 이 설정된 채로
 `gh` 를 실행하면 진짜 저장소에 쓴다 — 지금 이걸 막는 유일한 방지선은
 사용자가 로컬에 PAT 를 두지 않아서 `_token()` 이 먼저 `RuntimeError` 를

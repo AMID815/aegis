@@ -140,7 +140,7 @@ class Handler(BaseHTTPRequestHandler):
             {
                 "ok": True,
                 "number": _counter,
-                "url": f"https://github.com/AMID815/mouigosa/issues/{_counter}",
+                "url": f"https://github.com/AMID815/aegis/issues/{_counter}",
             },
         )
 

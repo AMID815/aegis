@@ -6,7 +6,7 @@
 // 그 다음은 이 저장소의 intake.yml → scripts/intake.py → scripts/models.py 가
 // 그대로 처리한다 — 이 파일이 바뀌어도 그 파이프라인은 전혀 안 바뀐다.
 //
-// 토큰 스코프가 이 설계의 핵심이다: GH_TOKEN 은 이 저장소(mouigosa)에
+// 토큰 스코프가 이 설계의 핵심이다: GH_TOKEN 은 이 저장소(aegis)에
 // "Issues: Read and write" 권한만 가진 fine-grained PAT여야 한다. **Contents
 // 권한은 절대 주지 않는다** — Contents:write 토큰은 main 브랜치의 app.js 를
 // 갈아치울 수 있고, 그러면 amid815.github.io 오리진 전체(모의고사와 같은
@@ -24,7 +24,7 @@
 // ── 설정 ────────────────────────────────────────────────────────────────
 
 const OWNER = "AMID815";
-const REPO = "mouigosa";
+const REPO = "aegis";
 const GITHUB_API = `https://api.github.com/repos/${OWNER}/${REPO}/issues`;
 
 // 이 오리진에서 온 요청만 브라우저가 응답을 읽을 수 있게 한다(CORS). 이게
@@ -271,7 +271,7 @@ export default {
           "Content-Type": "application/json",
           "X-GitHub-Api-Version": "2022-11-28",
           // 깃허브는 User-Agent 없는 요청을 거부한다.
-          "User-Agent": "mouigosa-intake-worker",
+          "User-Agent": "aegis-intake-worker",
         },
         body: JSON.stringify({ title, body: issueBody }),
       });

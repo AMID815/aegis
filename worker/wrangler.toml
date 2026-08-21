@@ -3,7 +3,7 @@
 # 절대 평문으로 적지 않는다 — GATE_PASS/GH_TOKEN 은 `wrangler secret put` 으로만
 # 넣는다(README 참고). 이 파일 자체는 저장소에 커밋되어 공개된다.
 
-name = "mouigosa-intake"
+name = "aegis-intake"
 main = "worker.js"
 # 이 세션의 시스템 날짜가 미래(2026년)로 맞춰져 있어, 그 날짜를 그대로 쓰면
 # 실제 Cloudflare 서버 기준으로는 "아직 안 온 날짜"라 wrangler deploy 가

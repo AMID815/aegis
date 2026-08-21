@@ -427,3 +427,38 @@ def test_만료_쓰기_실패는_종료코드에_반영된다(monkeypatch):
     rc = autofill.run({"005930": {"20260826": {"high": 250000, "low": 245000}}},
                       "2026-08-26", CAL)
     assert rc == 1
+
+
+def test_대기_종목의_일봉이_없으면_자동매수가_안_걸린다(monkeypatch):
+    """close.py 가 대기 종목의 일봉을 안 받아오던 실측 사고(2026-08-21)를
+    못박는다. bars 에 그 코드가 없으면 run() 은 `bar is None` 으로 조용히
+    건너뛴다 — 오류도, 경고도 없이 **자동매수가 영영 안 걸린다.**
+
+    이 테스트는 "일봉이 없으면 안 걸린다"는 사실 자체를 고정한다. 그래서
+    close.py 가 quotes.live_codes 로 대기 종목까지 받아오는 것이 왜
+    필수인지가 코드로 남는다.
+    """
+    fake = FakeGH({"schema": 1, "positions": [_pending()]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute",
+                        lambda code, day: [{"t": "202608210931",
+                                            "high": 241000, "low": 239000}])
+    # 일봉을 아예 안 넘긴다 — close.py 가 대기 종목을 빠뜨린 상태 그대로
+    rc = autofill.run({}, "2026-08-21", ["2026-08-20", "2026-08-21"])
+    assert rc == 0
+    assert fake.writes == [], "일봉이 없는데 체결됐다"
+    assert fake.state["positions"][0]["status"] == "pending"
+
+
+def test_대기_종목의_일봉이_있으면_자동매수가_걸린다(monkeypatch):
+    """위 테스트의 짝 — 일봉만 있으면 정상 체결된다. 둘을 같이 둬야
+    '안 걸리는 게 정상'과 '고쳐야 할 결손'이 구분된다."""
+    fake = FakeGH({"schema": 1, "positions": [_pending()]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute",
+                        lambda code, day: [{"t": "202608210931",
+                                            "high": 241000, "low": 239000}])
+    rc = autofill.run({"005930": {"20260821": {"high": 245000, "low": 239000}}},
+                      "2026-08-21", ["2026-08-20", "2026-08-21"])
+    assert rc == 0
+    assert fake.state["positions"][0]["status"] == "open"

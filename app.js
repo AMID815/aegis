@@ -443,7 +443,14 @@ function rows(state, quotes) {
     // 안 됐다) 지정가를 "매입가" 칸에 목표로 보여주고 나머지는 비운다.
     if (p.status === "pending") {
       const watchPrice = p.watch && typeof p.watch.price === "number" ? p.watch.price : null;
-      return { p, pending: true, expired: false, bad: false, buy: watchPrice, now: null, ret: null,
+      // 현재가를 붙인다. quotes.py 가 대기 종목까지 조회하도록 고친
+      // 뒤부터(live_codes, 2026-08-21) 실제로 값이 들어온다 — 그 전에는
+      // 이 칸이 늘 비어 있었고, 그건 화면 문제가 아니라 **대기 종목의
+      // 일봉·시세를 아예 안 받아와 자동매수가 통째로 안 돌던** 결함의
+      // 겉모습이었다.
+      const pq = (quotes.quotes || {})[p.code];
+      const pnow = pq ? pq.price : null;
+      return { p, pending: true, expired: false, bad: false, buy: watchPrice, now: pnow, ret: null,
                held: null, remainingDays: remainingWatchDays(dayIndex, days, last, p.watch),
                closed: false, mismatch: false, needsAdjustReview: false,
                halted: false, buyDate: null, sellDate: null, orders, auto };
@@ -718,10 +725,22 @@ function positionCells(r) {
 // 같은 처리). 남은 기간은 remainingWatchDays(rows() 가 이미 계산)를
 // 그대로 문구로 옮긴다 — "범위 밖"이라는 말은 이미 보유가 시작된
 // 기록에나 맞으므로 여기선 쓰지 않는다(rows() 옆 주석과 같은 이유).
+// 대기 행의 현재가 — 지정가까지 몇 % 남았는지 같이 보여준다. 대기 목록을
+// 보는 이유가 "얼마나 근접했나"이므로 가격만으로는 반쪽이다.
+//
+// 부호 규약: **지정가에 닿으려면 몇 % 더 움직여야 하는가**를 쓴다.
+// 현재가가 지정가보다 위면 그만큼 **내려야** 체결되므로 음수로 적는다
+// (5,340 → 5,000 이면 -6.4%). 이미 지정가 이하로 내려와 있으면(다음
+// 판정에서 체결될 가능성이 큰 상태) +로 나오고, 그 자체가 눈에 띈다.
+function watchGap(r) {
+  if (r.now === null || r.buy === null || !(r.buy > 0)) return "";
+  return " (" + fmtPct(pct(r.now, r.buy)) + ")";
+}
+
 function pendingCells(r) {
   return [
     { value: fmt(r.buy) },
-    { value: fmt(r.now) },
+    { value: r.now === null ? "-" : fmt(r.now) + watchGap(r) },
     { value: r.remainingDays === null ? "-" : (r.remainingDays >= 0 ? "D-" + r.remainingDays : "기한 지남") },
     { value: r.p.source || "(출처 없음)" },
   ];
@@ -2339,11 +2358,22 @@ function positionsFingerprint(state) {
   return JSON.stringify(list).length + "|" + ids;
 }
 
-// 재조회 간격 — 워크플로 왕복(이슈 접수 → intake.yml 적용 → 커밋)이
-// 대략 5~20초 걸린다(지시문 실측). 3초는 가장 빠른 경우를 놓치지 않기
-// 위한 첫 시도, 이후 6·10·15초로 늘려가며 대부분의 경우를 커버한다 —
-// 총 대기 34초, 시도 4회로 상한을 둔다(무한정 폴링하지 않는다).
-const REFRESH_POLL_DELAYS_MS = [3000, 6000, 10000, 15000];
+// 재조회 간격 — **실측으로 정한 값이다(2026-08-21).** 이 저장소의 이슈
+// 이력에서 `createdAt → closedAt`(= 페이지가 저장을 보낸 시각 → 워크플로가
+// positions.json 커밋을 마친 시각)을 실제 저장 10건에 대해 재봤다:
+//
+//     최소 10초 · 중앙값 13초 · 최대 14초
+//     (#17 11 · #18 12 · #21 14 · #22 10 · #24 13 · #27 10 · #28 12 …)
+//
+// 그래서 첫 확인을 8초에 둔다. 이전 값(3초 시작)은 3초·6초 두 번이 **거의
+// 항상 헛돌았고**, 중앙값 13초짜리 저장을 세 번째 시도인 19초에야 잡아
+// 사용자를 6초 더 기다리게 했다. 8·13·19·27·35 는 중앙값을 두 번째
+// 시도(13초)에 잡으면서 총 대기(35초)와 시도 상한은 예전과 같은 자리에
+// 둔다 — 시간초과 동작(잠금 해제 + "아직 반영 전입니다")이 안 바뀐다.
+//
+// 이 숫자를 바꾸려면 이슈 이력으로 다시 재라. 감이 아니라 측정에서 나온
+// 값이다.
+const REFRESH_POLL_DELAYS_MS = [8000, 5000, 6000, 8000, 8000];
 
 // 저장 성공(Worker 가 이슈를 열었다) 뒤 표가 그 반영을 자동으로 따라가게
 // 한다(항목 20, 실사고: 전부 삭제 뒤 세 종목을 추가했는데 전부 저장은

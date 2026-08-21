@@ -797,3 +797,75 @@ def test_자동체결_쓰기_실패는_close_종료코드에_반영된다(monkey
     monkeypatch.setattr(close.autofill, "run", lambda bars, day, days: 1)
     rc = close.main()
     assert rc == 1
+
+
+# ── 자동매수 대기 종목의 일봉 (2026-08-21 실측 사고) ──────────────────────
+#
+# close.py 가 quotes.open_codes(=status "open" 만)로 일봉 대상을 골랐다.
+# 그래서 대기(pending) 종목의 일봉이 아예 안 받아졌고, autofill.run 은
+# `bars.get(code)` 가 None 이라 그 자리에서 조용히 건너뛰었다 —
+# **자동매수가 한 번도 안 걸렸다.** 오류도 경고도 없었다.
+#
+# 라이브 확인: 금호전기(001210)가 대기 중인데 quotes.json 의 조회 종목이
+# 빈 배열이었다. 이 사고가 통과한 이유는 "close.py 가 어느 종목의 일봉을
+# 요청하는가"를 붙드는 테스트가 하나도 없었기 때문이다 — 여기서 채운다.
+
+_대기_포함 = {"schema": 1, "positions": [
+    {"id": "20260819-005930", "code": "005930", "name": "삼성전자",
+     "buys": [{"date": "2026-08-19", "price": 100000}],
+     "exits": [], "adjustments": [], "status": "open", "source": "수동",
+     "memo": "", "signal_date": None, "auto": True, "observed_at": None,
+     "orders": {"buy2": 94000, "buy3": 88000, "customized": False}},
+    {"id": "20260820-000660", "code": "000660", "name": "SK하이닉스",
+     "buys": [], "exits": [], "adjustments": [], "status": "pending",
+     "source": "수동", "memo": "", "signal_date": None, "auto": True,
+     "observed_at": None, "orders": {},
+     "watch": {"price": 50000, "date": "2026-08-20", "days": 5}},
+]}
+
+
+def test_대기_종목의_일봉도_받아온다(monkeypatch):
+    """이게 없으면 자동매수가 통째로 안 돈다 — 위 주석의 실측 사고."""
+    요청된 = []
+
+    def 가짜_bars(symbol, n=60):
+        요청된.append(symbol)
+        if symbol in _지수_bars:
+            return dict(_지수_bars[symbol])
+        return dict(_삼성_bars())
+
+    _기본_준비(monkeypatch, positions=_대기_포함, write_capture=[])
+    monkeypatch.setattr(close.naver, "fetch_bars", 가짜_bars)
+    monkeypatch.setattr(close.autofill, "run", lambda *a, **k: 0)
+    close.main()
+
+    보유·대기 = [c for c in 요청된 if c not in _지수_bars]
+    assert "005930" in 보유·대기, f"보유 종목이 빠졌다: {요청된}"
+    assert "000660" in 보유·대기, (
+        f"대기 종목의 일봉을 안 받았다 — 자동매수가 영영 안 걸린다: {요청된}")
+
+
+def test_종결_종목의_일봉은_안_받는다(monkeypatch):
+    """상폐된 종결 종목이 매번 조회를 실패시켜 확정 스냅샷의 fail_count 를
+    부풀리고 백필 게이트를 막던 것을 open_codes 가 원래 막고 있었다 —
+    대기를 넣으면서 그 보호까지 풀면 안 된다."""
+    요청된 = []
+    닫힌 = {"schema": 1, "positions": [
+        {"id": "20260819-005930", "code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-08-19", "price": 100000}],
+         "exits": [{"date": "2026-08-20", "price": 110000, "reason": ""}],
+         "adjustments": [], "status": "closed", "source": "수동", "memo": "",
+         "signal_date": None, "auto": True, "observed_at": None, "orders": {}},
+    ]}
+
+    def 가짜_bars(symbol, n=60):
+        요청된.append(symbol)
+        if symbol in _지수_bars:
+            return dict(_지수_bars[symbol])
+        return dict(_삼성_bars())
+
+    _기본_준비(monkeypatch, positions=닫힌, write_capture=[])
+    monkeypatch.setattr(close.naver, "fetch_bars", 가짜_bars)
+    monkeypatch.setattr(close.autofill, "run", lambda *a, **k: 0)
+    close.main()
+    assert [c for c in 요청된 if c not in _지수_bars] == []

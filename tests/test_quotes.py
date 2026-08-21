@@ -484,3 +484,48 @@ def test_지수_이력을_YYYY_MM_DD_키로_한번의_요청에서_수집한다(
         "2026-08-18": pytest.approx(6460.0),
         "2026-08-19": pytest.approx(6471.17),
     }
+
+
+# ── 자동매수 대기 종목도 조회 대상이어야 한다 (2026-08-21 실측 사고) ──────
+#
+# open_codes() 가 status=="open" 만 골랐다. close.py 는 이 목록으로 **일봉**을
+# 받고, autofill.run 은 그 bars 에서 대기 종목의 그날 저가를 찾아 지정가 도달을
+# 판정한다 — 즉 대기 종목이 목록에 없으면 `bars.get(code)` 가 None 이라
+# **자동매수가 한 번도 안 걸린다.** 라이브에서 실제로 그랬다(금호전기 001210,
+# quotes.json 의 조회 종목이 빈 배열).
+#
+# 화면 쪽 증상(대기 표의 현재가가 늘 비어 있음)은 같은 원인의 겉모습일 뿐이고,
+# 진짜 피해는 기능이 통째로 안 도는 것이었다.
+
+def test_대기_종목도_조회_대상이다():
+    st = models.normalize({"schema": 1, "positions": [
+        {"code": "005930", "buys": [{"date": "2026-08-19", "price": 100000}],
+         "status": "open", "orders": {"buy2": 94000, "buy3": 88000}},
+        {"code": "000660", "buys": [], "status": "pending",
+         "watch": {"price": 50000, "date": "2026-08-20", "days": 5}},
+    ]})
+    assert quotes.live_codes(st) == ["005930", "000660"]
+
+
+def test_종결_만료는_조회_대상이_아니다():
+    """이미 끝난 기록은 오늘 시세가 필요 없다. 상폐된 종목이 매번 조회를
+    실패시켜 fail_count 를 부풀리는 것도 막는다(open_codes 의 원래 취지)."""
+    st = models.normalize({"schema": 1, "positions": [
+        {"code": "005930", "buys": [{"date": "2026-08-19", "price": 100000}],
+         "status": "closed", "exits": [{"date": "2026-08-20", "price": 1, "reason": ""}]},
+        {"code": "000660", "buys": [], "status": "expired",
+         "watch": {"price": 50000, "date": "2026-08-01", "days": 5}},
+    ]})
+    assert quotes.live_codes(st) == []
+
+
+def test_같은_코드가_보유와_대기로_동시에_있으면_한_번만():
+    """중복이 남으면 missing_codes 가 같은 코드를 두 번 실어 fail_count 가
+    부풀어 오른다 — open_codes 가 원래 막던 것과 같은 함정."""
+    st = models.normalize({"schema": 1, "positions": [
+        {"code": "005930", "buys": [{"date": "2026-08-19", "price": 100000}],
+         "status": "open", "orders": {"buy2": 94000, "buy3": 88000}},
+        {"code": "005930", "buys": [], "status": "pending",
+         "watch": {"price": 50000, "date": "2026-08-20", "days": 5}},
+    ]})
+    assert quotes.live_codes(st) == ["005930"]

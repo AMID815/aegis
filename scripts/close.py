@@ -171,7 +171,11 @@ def main() -> int:
     # 닫힌 종목이 매번 fetch_bars 를 실패시켜 확정 스냅샷의 missing/
     # fail_count 를 무의미하게 부풀리고, 아래 "일봉 완전 실패 시 백필
     # 건너뛴다" 게이트와 만나면 그 종목이 상폐인 한 백필이 영원히 막힌다.
-    codes = quotes.open_codes(state)
+    # 보유 중 + 자동매수 대기(quotes.live_codes). 대기 종목이 빠지면
+    # autofill.run 의 bars 에 그 코드가 없어 `bar is None` 으로 건너뛰고,
+    # **자동매수가 한 번도 안 걸린다**(2026-08-21 라이브 실측: 금호전기
+    # 001210 이 대기 중인데 조회 종목이 빈 배열이었다).
+    codes = quotes.live_codes(state)
 
     try:
         days = naver.fetch_trading_days(250)

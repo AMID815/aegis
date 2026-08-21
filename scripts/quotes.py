@@ -67,6 +67,32 @@ def open_codes(state: dict) -> list:
     return list(dict.fromkeys(codes))
 
 
+def live_codes(state: dict) -> list:
+    """오늘 시세·일봉이 필요한 종목 — **보유 중(open) + 자동매수 대기(pending)**.
+
+    `open_codes` 를 그대로 쓰면 안 되는 이유(2026-08-21 실측 사고):
+
+    close.py 는 이 목록으로 일봉을 받고, autofill.run 은 그 `bars` 에서 대기
+    종목의 그날 저가를 찾아 지정가 도달을 판정한다. 대기 종목이 목록에
+    없으면 `bars.get(code)` 가 None 이라 그 자리에서 `continue` —
+    **자동매수가 한 번도 안 걸린다.** 라이브에서 실제로 그랬다(금호전기
+    001210 이 대기 중인데 조회 종목이 빈 배열이었다). 화면의 "대기 표
+    현재가가 늘 비어 있다"는 증상은 같은 원인의 겉모습일 뿐이고, 진짜
+    피해는 기능이 통째로 안 돈 것이었다.
+
+    종결(closed)·만료(expired)는 뺀다 — 오늘 시세가 필요 없고, 상폐된
+    종목이 매번 조회를 실패시켜 fail_count 를 부풀리는 것도 막는다
+    (open_codes 가 원래 지키던 것과 같은 이유).
+
+    `open_codes` 는 지우지 않고 남긴다. "지금 실제로 들고 있는 것"이라는
+    다른 뜻이 필요한 자리가 앞으로 생길 수 있고, 이름과 뜻이 어긋난 채로
+    범위만 넓히는 것보다 두 이름을 각자 정직하게 두는 쪽이 낫다.
+    """
+    codes = [p["code"] for p in state.get("positions", [])
+             if p.get("status") in (models.OPEN, models.PENDING)]
+    return list(dict.fromkeys(codes))
+
+
 def build(got: dict, asked: list, days: list, bench: dict,
           now_kst: str, is_final: bool, dropped: int = 0,
           bench_history: dict | None = None,
@@ -200,7 +226,7 @@ def main() -> int:
             print(f"[경고] positions.json 최상위 구조를 읽지 못했다 — 보유 전체가 가려짐: {note}")
         else:
             print(f"[경고] 해석 불가 항목 {len(bad)}건 — 이 종목들은 시세를 붙이지 않는다")
-    codes = open_codes(state)
+    codes = live_codes(state)
     try:
         got = naver.fetch_quotes(codes)
     except Exception as e:

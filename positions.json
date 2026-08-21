@@ -1,29 +1,4 @@
 {
- "positions": [
-  {
-   "adjustments": [],
-   "auto": true,
-   "buys": [
-    {
-     "date": "2026-08-21",
-     "price": 250000
-    }
-   ],
-   "code": "192820",
-   "exits": [],
-   "id": "20260821-192820",
-   "memo": "",
-   "name": "코스맥스",
-   "observed_at": null,
-   "orders": {
-    "buy2": 235000,
-    "buy3": 220000,
-    "customized": false
-   },
-   "signal_date": null,
-   "source": "수동",
-   "status": "open"
-  }
- ],
+ "positions": [],
  "schema": 1
 }

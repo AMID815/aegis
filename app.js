@@ -462,6 +462,18 @@ function nameCell(tr, r, mark) {
   const span = document.createElement("span");
   span.textContent = (r.p.name || r.p.code || "?") + mark;
   wrap.appendChild(span);
+
+  // 버튼들을 이름과 분리된 자식 flex 컨테이너에 몰아넣는다(style.css
+  // .name-actions 옆 주석 — FIX: 표 안의 버튼 정렬). 행마다 버튼 개수가
+  // 다르다(열린 정상 행 3개, 닫힌 정상 행 2개, 대기 행 2개, bad·만료 행
+  // 1개뿐) — margin-left:auto 로 이 그룹 하나만 오른쪽 끝에 붙이면, 버튼
+  // 개수와 무관하게 그룹의 오른쪽 끝(=삭제 버튼)이 행마다 항상 같은
+  // 자리에 온다. actions 에 자식이 하나도 없는 행은 없다(모든 행이
+  // 최소 삭제 버튼 하나는 갖는다, 아래 참조) — 그래도 빈 채로 wrap 에
+  // append 해도 레이아웃엔 해가 없다.
+  const actions = document.createElement("div");
+  actions.className = "name-actions";
+
   if (!r.bad && typeof r.p.id === "string" && r.p.id) {
     // 대기(pending)·만료(expired) 기록에는 고치기를 달지 않는다. 달면
     // startAmend 가 isReadablePosition(buys 가 비어 있어 false)에서
@@ -477,7 +489,7 @@ function nameCell(tr, r, mark) {
     btn.textContent = "고치기";
     btn.dataset.id = r.p.id;
     btn.setAttribute("aria-label", "고치기: " + (r.p.name || r.p.code || "?"));
-    wrap.appendChild(btn);
+    actions.appendChild(btn);
     }
 
     // 자동/수동 토글 — 종결된 기록(closed)이나 만료된 기록(expired)은 더
@@ -495,7 +507,7 @@ function nameCell(tr, r, mark) {
       toggleBtn.setAttribute("aria-label",
         (r.auto === false ? "자동 매매로 전환: " : "자동 매매 예외(수동)로 전환: ")
         + (r.p.name || r.p.code || "?"));
-      wrap.appendChild(toggleBtn);
+      actions.appendChild(toggleBtn);
     }
   }
 
@@ -515,8 +527,9 @@ function nameCell(tr, r, mark) {
     delBtn.textContent = "삭제";
     delBtn.dataset.id = r.p.id;
     delBtn.setAttribute("aria-label", "삭제: " + (r.p.name || r.p.code || "?"));
-    wrap.appendChild(delBtn);
+    actions.appendChild(delBtn);
   }
+  if (actions.childElementCount) wrap.appendChild(actions);
   td.appendChild(wrap);
 
   // 자동 예외로 지정된 기록은 표에서 바로 구분되어야 한다. 안 그러면
@@ -794,11 +807,42 @@ function renderStale(quotes, flags) {
   el.hidden = msgs.length === 0;
 }
 
+// main() 의 "데이터를 받아 화면에 뿌리는" 절반만 떼어낸 함수(항목 20,
+// feat/refresh-after-write) — 표·요약·지수·stale 배지 넷을 state/quotes
+// 로부터 다시 그린다. main() 자신과 refreshAfterWrite() 가 공유한다.
+// **폼은 절대 건드리지 않는다** — 매입일 기본값도, master.json/자동완성도,
+// #q/#price 같은 입력 필드도 여기서 만지지 않는다. 그래서 "고치기"로 폼을
+// 편집하는 도중(amendTarget 이 있는 상태)에 이 함수를 불러도 안전하다 —
+// 편집 중인 폼 값은 이 함수가 손대는 요소(표/summary/stale) 밖에 있다.
+// 오류 경계(항목 13)도 main() 이 원래 하던 그대로 여기로 옮겨왔다 — 이
+// 함수를 새 호출부(refreshAfterWrite)에서 불러도 렌더 중 예외 하나가
+// 페이지 전체를 죽이지 않는다.
+function renderData(state, quotes, flags) {
+  try {
+    renderStale(quotes, flags || {});
+    const all = rows(state, quotes);
+    renderTable("open", all.filter(r => !r.closed));
+    renderTable("closed", all.filter(r => r.closed));
+    renderSummary(all, quotes);
+    renderBenchmark(quotes);
+  } catch (e) {
+    reportFatal(e);
+  }
+}
+
 // ── Task 13: 입력 폼 → 이슈 URL ─────────────────────────────────────────
 
 let MASTER = [], NAMES = new Map(), STATE = { positions: [] }, QUOTES = {};
 let MASTER_PRICES = new Map();   // 코드 → 가격(있으면 int, 없으면 null) — 항목 18
 let masterLoadFailed = false;    // 제출 시 안내 문구를 바꾸는 데만 쓴다
+// main() 의 최초 로드가 얻은 성패 — renderData() 는 이 값을 다시 계산하지
+// 않고 그대로 받는다(rows/renderTable 등과 달리 성패는 fetch 결과에서만
+// 나온다). refreshAfterWrite() 가 재조회에 성공하면 positionsFailed 를
+// false 로 갱신한다 — 쓰기 직후 재조회는 실패해도(포기) #stale 배지의
+// "positions.json 을 불러오지 못했습니다" 문구를 다시 띄우지 않는다(그
+// 실패는 최초 로드와 무관한 별개의 사실이라 renderRefreshStatus 가 이미
+// 그 상황을 따로 알린다 — 항목 20 참조).
+let LOAD_FLAGS = { positionsFailed: false, quotesFailed: false };
 
 // Task 15: amend 모드 상태. null 이면 매입/매도 모드(#q 로 암묵 전환).
 // 값이 있으면 amend 모드 — #q 를 바꿔도 매입/매도로 되돌아가지 않고,
@@ -1636,6 +1680,88 @@ function renderResult(info) {
   }
 }
 
+// #result 안에 폴링 진행 상황 한 줄을 얹는다(항목 20) — renderResult() 가
+// 매번 el 을 통째로 비우므로(위 renderResult 주석), 이 함수는 그 호출
+// *뒤에* 불려야 자기가 붙인 줄이 살아남는다(writeRecord 성공 분기 참조).
+// 같은 <p> 를 재사용해 갱신한다 — 폴링마다 새 <p> 를 쌓지 않는다.
+// #result 자체가 이미 role=status/aria-live=polite 라 이 줄의 갱신도
+// 스크린리더에 자연히 같이 읽힌다.
+function renderRefreshStatus(msg) {
+  const el = document.getElementById("result");
+  if (!el) return;
+  let p = el.querySelector(".refresh-status");
+  if (!p) {
+    p = document.createElement("p");
+    p.className = "refresh-status";
+    el.appendChild(p);
+  }
+  p.textContent = msg;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// positions.json 이 실제로 바뀌었는지 판정하는 지문(항목 20) — 세 갈래
+// 쓰기 결과를 전부 하나로 잡아야 한다: buy/watch 는 id 하나가 늘고,
+// delete 는 하나가 준다(길이·id 목록 둘 다 바뀐다), sell/amend/orders/
+// auto 는 id 목록도 길이도 그대로인 채 내용만 바뀐다(가격·상태·exits·
+// orders 카운터·auto 플래그 등). 직렬화 길이만 보면 삭제와 다른 필드
+// 증가가 우연히 상쇄돼 길이가 같아지는 경우를 놓치고, id 목록만 보면
+// 추가/삭제가 없는 제자리 수정을 놓친다 — 둘을 이어붙여 어느 한쪽만
+// 보고 "안 바뀜"으로 오판할 여지를 줄인다(완벽한 해시는 아니지만 과제가
+// 요구한 "가장 단순하고 튼튼한 신호"로는 충분하다).
+function positionsFingerprint(state) {
+  const list = Array.isArray(state.positions) ? state.positions : [];
+  const ids = list.map(p => (typeof p.id === "string" ? p.id : "?")).join(",");
+  return JSON.stringify(list).length + "|" + ids;
+}
+
+// 재조회 간격 — 워크플로 왕복(이슈 접수 → intake.yml 적용 → 커밋)이
+// 대략 5~20초 걸린다(지시문 실측). 3초는 가장 빠른 경우를 놓치지 않기
+// 위한 첫 시도, 이후 6·10·15초로 늘려가며 대부분의 경우를 커버한다 —
+// 총 대기 34초, 시도 4회로 상한을 둔다(무한정 폴링하지 않는다).
+const REFRESH_POLL_DELAYS_MS = [3000, 6000, 10000, 15000];
+
+// 저장 성공(Worker 가 이슈를 열었다) 뒤 표가 그 반영을 자동으로 따라가게
+// 한다(항목 20, 실사고: 전부 삭제 뒤 세 종목을 추가했는데 전부 저장은
+// 됐지만 표가 안 바뀌어 "저장이 안 된 줄 알고" 다시 제출하게 만들었다 —
+// 그 혼동이 이 저장소 이슈 이력에 남은 중복 삭제 사고와 같은 모양이다).
+// **await 하지 않고 호출한다**(writeRecord 참조) — 사용자는 renderResult()
+// 의 성공 문구를 즉시 보고, 표는 그 아래에서 조용히 따라잡는다.
+//
+// cache:"no-store" 는 load() 의 기본값을 그대로 쓴다(옵션에서 cacheMode
+// 를 안 준다) — startAmend()/onAmendSubmit() 의 재조회와 같은 이유:
+// raw.githubusercontent.com 은 캐시가 공격적이라, 이게 없으면 쓰기 전
+// 사본을 계속 다시 읽어 "반영 안 됨"을 오판한다.
+async function refreshAfterWrite() {
+  const before = positionsFingerprint(STATE);
+  for (let i = 0; i < REFRESH_POLL_DELAYS_MS.length; i++) {
+    renderRefreshStatus("반영 확인 중… (" + (i + 1) + "/" + REFRESH_POLL_DELAYS_MS.length + ")");
+    await sleep(REFRESH_POLL_DELAYS_MS[i]);
+    // allow404 를 켠다 — main() 의 최초 로드와 같은 관용(positions.json 이
+    // 첫 실행 이후 아직 한 번도 안 커밋된 상태 자체는 실패가 아니다).
+    // 실제로는 이 시점엔 이미 최소 한 번 존재했던 게 거의 확실하지만,
+    // 최초 로드와 다른 관용을 적용할 근거가 없다.
+    const res = await load("positions.json", { positions: [] }, { allow404: true });
+    if (!res.ok) continue;   // 일시적 네트워크 실패 — 다음 간격에 다시 시도, 포기하지 않는다
+    if (positionsFingerprint(res.data) === before) continue;   // 아직 반영 전
+    STATE = res.data;
+    LOAD_FLAGS = { ...LOAD_FLAGS, positionsFailed: false };
+    // amendTarget 이 있어도(사용자가 "고치기" 로 편집 중) 안전하다 —
+    // renderData() 는 표/요약/stale 만 다시 그리고 폼 필드는 절대
+    // 건드리지 않는다(위 renderData 주석).
+    renderData(STATE, QUOTES, LOAD_FLAGS);
+    renderRefreshStatus("표를 새로고침했습니다.");
+    return;
+  }
+  // 포기 — 조용히 넘어가지 않는다(지시문: "silently give up" 도
+  // "claim success" 도 금지). 실제로는 반영됐는데 이 페이지가 못 봤을
+  // 수도 있다(워크플로가 유난히 느렸다 등) — 그래서 "실패"가 아니라
+  // "아직" 이라고만 말한다.
+  renderRefreshStatus("아직 반영 전입니다 — 잠시 후 새로고침해주세요.");
+}
+
 // buy/sell(onSubmit)과 amend(onAmendSubmit) 제출 경로가 공유하는 마지막
 // 단계 — Worker 를 먼저 시도하고, 그 결과에 따라 자동 폴백/수동 탈출구/
 // 성공 표시 중 하나로 마무리한다.
@@ -1657,8 +1783,15 @@ async function writeRecord(payload, title, display, pending) {
       if (pending) pending.close();
       renderResult({ kind: "success", number: outcome.number, url: outcome.url });
       addStaleMessage("방금 Worker로 저장을 요청했습니다(이슈 #" + outcome.number + ") — 워크플로가 "
-        + "반영할 때까지 몇 분 걸릴 수 있습니다. 이 표는 아직 이전 값을 보여주고 있으니, 나중에 "
-        + "새로고침해서 확인해주세요.");
+        + "반영할 때까지 몇 초에서 수십 초 걸릴 수 있습니다. 표는 반영되는 대로 자동으로 "
+        + "새로고침됩니다(아래 진행 상황 참조).");
+      // 항목 20 — 성공 렌더 *뒤에* 걸어야 renderRefreshStatus() 가 붙이는
+      // 줄이 renderResult() 의 el.textContent="" 에 지워지지 않는다.
+      // await 하지 않는다(지시문: 새로고침 확인에 응답을 블록하지 말 것) —
+      // 실패해도(예상 못 한 예외) 전역 unhandledrejection 경계 대신 여기서
+      // 직접 reportFatal 로 받는다: writeRecord() 자신은 이미 반환된 뒤라
+      // 그 경계가 잡아도 되지만, 어디서 왔는지 더 분명하게 여기서 잡는다.
+      refreshAfterWrite().catch(reportFatal);
       return { ok: true };
     }
     if (outcome.reason === "not-configured" || outcome.reason === "network") {
@@ -1815,23 +1948,15 @@ async function main() {
   ]);
   STATE = posRes.data;
   QUOTES = qtRes.data;
+  LOAD_FLAGS = { positionsFailed: !posRes.ok, quotesFailed: !qtRes.ok };
 
-  // 렌더는 별도 try 로 감싼다(항목 13, F1) — 여기서 하나라도 던지면(예:
-  // benchmark 값에 null 이 섞여 renderBenchmark 가 던짐) 그 아래 폼
-  // 배선(매입일 기본값·master.json 로드·자동완성/모드)까지 실행이
-  // 멈춰서, 표는 그려졌는데 폼은 고장난 "겉보기엔 멀쩡한" 상태가 된다.
-  // master.json 을 이 앞으로 다시 당기지는 않는다 — 그러면 항목 2 가
-  // 고친 첫 페인트 지연이 되살아난다.
-  try {
-    renderStale(QUOTES, { positionsFailed: !posRes.ok, quotesFailed: !qtRes.ok });
-    const all = rows(STATE, QUOTES);
-    renderTable("open", all.filter(r => !r.closed));
-    renderTable("closed", all.filter(r => r.closed));
-    renderSummary(all, QUOTES);
-    renderBenchmark(QUOTES);
-  } catch (e) {
-    reportFatal(e);
-  }
+  // 렌더(renderData, 항목 13/20) 자신의 try/catch 가 렌더 실패를 흡수한다
+  // — 여기서 하나라도 던지면(예: benchmark 값에 null 이 섞여
+  // renderBenchmark 가 던짐) 그 아래 폼 배선(매입일 기본값·master.json
+  // 로드·자동완성/모드)까지 실행이 멈춰서, 표는 그려졌는데 폼은 고장난
+  // "겉보기엔 멀쩡한" 상태가 된다. master.json 을 이 앞으로 다시 당기지는
+  // 않는다 — 그러면 항목 2 가 고친 첫 페인트 지연이 되살아난다.
+  renderData(STATE, QUOTES, LOAD_FLAGS);
 
   // 매입일 기본값 — 저녁에 그날 매매를 몰아 적는 게 가장 흔한 경로지만,
   // 장중(정규장 마감 15:31~32 전)에 방금 산 걸 바로 적는 경우도 있다.

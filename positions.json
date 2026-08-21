@@ -47,6 +47,30 @@
    "signal_date": null,
    "source": "수동",
    "status": "open"
+  },
+  {
+   "adjustments": [],
+   "auto": true,
+   "buys": [
+    {
+     "date": "2026-08-21",
+     "price": 200000
+    }
+   ],
+   "code": "036930",
+   "exits": [],
+   "id": "20260821-036930",
+   "memo": "",
+   "name": "주성엔지니어링",
+   "observed_at": null,
+   "orders": {
+    "buy2": 188000,
+    "buy3": 176000,
+    "customized": false
+   },
+   "signal_date": null,
+   "source": "수동",
+   "status": "open"
   }
  ],
  "schema": 1

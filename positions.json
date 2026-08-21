@@ -67,6 +67,30 @@
     "days": 5,
     "price": 250000
    }
+  },
+  {
+   "adjustments": [],
+   "auto": true,
+   "buys": [
+    {
+     "date": "2026-08-21",
+     "price": 420000
+    }
+   ],
+   "code": "004170",
+   "exits": [],
+   "id": "20260821-004170",
+   "memo": "",
+   "name": "신세계",
+   "observed_at": null,
+   "orders": {
+    "buy2": 394500,
+    "buy3": 369500,
+    "customized": false
+   },
+   "signal_date": null,
+   "source": "수동",
+   "status": "open"
   }
  ],
  "schema": 1

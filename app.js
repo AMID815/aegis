@@ -136,7 +136,7 @@
 // 승률/평균수익률 대 평균보유 분모 차이(의도된 동작 — 계산 가능 조건
 // 자체가 다르다).
 //
-// 4라운드(지정가 관찰의 기한, feat/watch-expiry) 반영:
+// 4라운드(자동매수의 유효 기간, feat/watch-expiry) 반영:
 //
 // 19. "며칠 이내에 N원에 닿으면 자동 매수" — "며칠 이내에"가 빠져 있었다
 //     (scripts/models.py `watch.days`, autofill.py 가 거래일 달력으로
@@ -149,7 +149,7 @@
 //     false 지만(매도도 실현손익도 없다) renderSummary 의 미결 집계에서는
 //     expired 플래그로 직접 빼야 한다(closed 하나만으로는 안 빠진다 —
 //     mismatch/needsAdjustReview 와 같은 이유). nameCell 은 pending 과
-//     같은 이유로 고치기·자동전환 버튼을 안 단다. 남은 관찰 기간
+//     같은 이유로 고치기·자동전환 버튼을 안 단다. 남은 유효 기간
 //     (remainingWatchDays)은 화면 표시 전용이다 — 실제 만료 판정은 항상
 //     서버(autofill.run)가 하고, 이 값을 못 구해도(달력 범위 밖 등)
 //     조용히 "-"로 물러날 뿐 아무것도 막지 않는다.
@@ -436,7 +436,7 @@ function rows(state, quotes) {
     const orders = p.orders || {};
     const auto = p.auto !== false;
 
-    // 지정가 관찰(watch) 대기 기록 — 아직 아무것도 안 샀으므로 buys 가
+    // 자동매수(op: watch) 대기 기록 — 아직 아무것도 안 샀으므로 buys 가
     // 정상적으로 비어 있다. isReadablePosition 기준(아래)으로 판정하면
     // "읽을 수 없음"으로 잘못 뜬다 — 이 기록은 손상이 아니라 정상적인
     // 대기 상태다. 매입가/현재가/수익률은 아직 의미가 없으므로(1차 매수도
@@ -449,7 +449,7 @@ function rows(state, quotes) {
                halted: false, buyDate: null, sellDate: null, orders, auto };
     }
 
-    // 지정가 관찰이 기한(watch.days 거래일) 안에 목표가에 안 닿아 끝난
+    // 자동매수이 기한(watch.days 거래일) 안에 목표가에 안 닿아 끝난
     // 기록 — "이 스크리너의 신호가 안 왔다"는 그 자체로 결과이지 이기고
     // 지는 게 아니다(지시문 결정 4). buys 는 pending 과 마찬가지로 계속
     // 비어 있다 — closed 는 false 로 둔다(매도도, 실현 손익도 없다 —
@@ -709,7 +709,7 @@ function renderTable(id, list, quotes) {
     cell(tr, fmt(r.buy));
     cell(tr, fmt(r.now));
     cell(tr, fmtPct(r.ret), cls(r.ret));
-    // pending 은 남은 관찰 기간(remainingDays 를 구할 수 있으면)을 보여준다
+    // pending 은 남은 유효 기간(remainingDays 를 구할 수 있으면)을 보여준다
     // — "범위 밖"(=달력 범위 밖이라 못 구함)이라는 문구는 이미 보유가
     // 시작된 기록에나 맞는 말이라 아직 세기 시작도 안 한 pending 에는
     // 사실과 다르게 읽힌다. expired 는 더 이상 셀 보유일수 자체가 없으므로
@@ -753,7 +753,7 @@ function isExpandable(r) {
 }
 
 // 체결 날짜·시각을 한 줄로 합친다. t(분 단위 체결 시각, "YYYYMMDDHHMM")는
-// 자동 체결(2차·3차·익절·손절, 그리고 지정가 관찰이 체결된 1차)에만 있다
+// 자동 체결(2차·3차·익절·손절, 그리고 자동매수이 체결된 1차)에만 있다
 // — 손으로 "지금 관측"을 입력한 1차는 날짜만 있고 시각이 없다(apply_buy
 // 는 t 를 안 남긴다). 시각이 없으면 날짜만 보여준다.
 function fmtFillMoment(date, t) {
@@ -1407,18 +1407,18 @@ function applyMode(mode, opts) {
     setExitFieldsVisible(!!opts.hasExit);
     setWatchFieldVisible(false);
   } else if (mode === "watch") {
-    // Task 13(지정가 관찰) — #price 대신 #watch-price 를 받는다. 매입가
+    // Task 13(자동매수) — #price 대신 #watch-price 를 받는다. 매입가
     // 필드를 숨기는 김에 required 도 같이 끈다(아래 setWatchFieldVisible
     // 옆 주석과 같은 이유 — 숨은 필드에 required 가 남으면 submit 자체가
     // 죽는다). #source-field 는 켜 둔다 — 관찰도 어느 스크리너의 신호로
     // 시작한 것일 수 있어 출처가 여전히 의미 있다(지시문).
     modeEl.hidden = false;
-    modeEl.textContent = "지정가 관찰 — 목표가에 닿으면 1차 매수가 자동 체결됩니다";
+    modeEl.textContent = "자동매수 — 지정가에 닿으면 1차 매수가 자동 체결됩니다";
     label.textContent = "매입가";   // 숨어서 안 보이지만, buy 로 되돌아갈 때 바로 맞는 문구가 되도록 미리 맞춰둔다
     priceField.hidden = true;
     price.required = false;
     srcField.hidden = false;
-    btn.textContent = "관찰 시작";
+    btn.textContent = "자동매수 등록";
     cancelBtn.hidden = true;
     sigField.hidden = true;
     setExitFieldsVisible(false);
@@ -1453,10 +1453,10 @@ function updateMode() {
   // 함수 안에도 한 번 더 둔다 — 호출부 가드가 나중에 또 빠지더라도
   // amend 도중에는 최소한 이 함수 자체가 아무 것도 안 하게.
   if (amendTarget) return;
-  // Task 13(지정가 관찰) — #entry-mode 가 "watch" 면 #q 로 고른 종목의
+  // Task 13(자동매수) — #entry-mode 가 "watch" 면 #q 로 고른 종목의
   // 보유 여부와 무관하게 관찰 모드를 유지한다. 이 가드가 없으면, 이미
   // 보유 중인 종목의 코드를 입력하는 순간(드물지만 막을 이유도 없는
-  // 경우) findOpenPosition 이 걸려 사용자가 방금 고른 "지정가 관찰"을
+  // 경우) findOpenPosition 이 걸려 사용자가 방금 고른 "자동매수"을
   // 코드가 조용히 "매도"로 되돌려버린다.
   const entryMode = document.getElementById("entry-mode").value;
   if (entryMode === "watch") {
@@ -1483,7 +1483,7 @@ function setExitFieldsVisible(v) {
   document.getElementById("exit-date").required = v;
 }
 
-// Task 13(지정가 관찰) — #watch-price 도 같은 함정을 갖고 있다: hidden 인
+// Task 13(자동매수) — #watch-price 도 같은 함정을 갖고 있다: hidden 인
 // 컨트롤에 required 가 남아 있으면 그 필드에서 constraint validation 이
 // 막혀 submit 이벤트 자체가 안 나간다(위 setExitFieldsVisible 옆 주석,
 // 리뷰 C1 이 실제로 겪은 사고). hidden 과 required 를 항상 한 자리에서
@@ -1772,7 +1772,7 @@ function exitAmendMode() {
   document.getElementById("exit-price").value = "";
   document.getElementById("exit-date").value = "";
   document.getElementById("exit-reason").value = "";
-  // amend 로 들어오기 전에 "지정가 관찰"을 골라뒀을 수 있다 — applyMode("buy")
+  // amend 로 들어오기 전에 "자동매수"을 골라뒀을 수 있다 — applyMode("buy")
   // 는 화면을 강제로 매입 모드로 되돌리는데, #entry-mode 를 그대로 두면
   // 셀렉트는 "관찰"을 가리키면서 화면은 매입가 칸을 보여주는 어긋난
   // 상태가 된다(다음 #entry-mode change 나 #q input 이 있기 전까지).
@@ -2295,7 +2295,7 @@ async function onSubmit(ev) {
   const date = document.getElementById("date").value;
   if (!date) return alert("매입일을 골라주세요.");
 
-  // Task 13(지정가 관찰) — 지금 렌더된 모드가 곧 폼의 진실이다(applyMode
+  // Task 13(자동매수) — 지금 렌더된 모드가 곧 폼의 진실이다(applyMode
   // 가 매번 #form.dataset.mode 를 같이 써 두므로, updateMode() 의 판정과
   // 어긋날 일이 없다). 관찰 모드에서는 #price 가 숨어 있어(값이 남아있을
   // 수도, 비어있을 수도 있다) 매입가 검증 대상이 아니다 — #watch-price 를
@@ -2307,7 +2307,7 @@ async function onSubmit(ev) {
   // 오타 방지: 참고가(referencePrice — quotes 우선, 없으면 master.json
   // 현재가로 폴백, 항목 18) 대비 ±30% 를 벗어나면 되묻는다. 참고가가
   // 아예 없으면(null) 조용히 넘어간다 — referencePrice 옆 주석 참조.
-  // 지정가 관찰도 결국 이 가격에 자동으로 1차 매수가 걸리므로, 매입가
+  // 자동매수도 결국 이 가격에 자동으로 1차 매수가 걸리므로, 매입가
   // 오타와 똑같은 무게로 다룬다 — 여기서만 봐주면 오타 하나가 그대로
   // 대기 주문에 실려 나중에(며칠 뒤일 수도 있다) 조용히 체결된다.
   const ref = referencePrice(code);
@@ -2328,7 +2328,7 @@ async function onSubmit(ev) {
     // 안 본다.
     const days = parsePrice(document.getElementById("watch-days").value);
     if (!(Number.isInteger(days) && days >= 1 && days <= 60)) {
-      return alert("관찰 기간은 1~60 거래일 사이의 정수여야 합니다.");
+      return alert("유효 기간은 1~60 거래일 사이의 정수여야 합니다.");
     }
     const payload = { op: "watch", code, name, price, date, days,
       source: document.getElementById("source").value,
@@ -2354,7 +2354,7 @@ document.getElementById("q").addEventListener("input", e => {
   // (Task 15 — amend 는 버튼으로만 들어오고 #cancel-btn 으로만 나간다).
   if (!amendTarget) updateMode();
 });
-// Task 13(지정가 관찰) — #q 입력 리스너와 같은 가드를 쓴다. amend 도중에
+// Task 13(자동매수) — #q 입력 리스너와 같은 가드를 쓴다. amend 도중에
 // 이 셀렉트를 만지는 경우는 흔치 않지만, 만약 만지더라도 amend 화면이
 // 매입/관찰 모드로 갑자기 바뀌면 안 된다(같은 이유, 위 리뷰 C2).
 document.getElementById("entry-mode").addEventListener("change", () => {

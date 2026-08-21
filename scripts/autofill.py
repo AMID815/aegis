@@ -109,7 +109,7 @@ def run(bars: dict, day: str, days_list: list) -> int:
     """하루치 집행. `bars` 는 close.py 가 이미 받아둔 일봉이다.
 
     `days_list` 는 거래일 달력(close.py 가 `naver.fetch_trading_days` 로
-    이미 받아둔 것)이다 — 지정가 관찰의 기한(watch.days)이 거래일로
+    이미 받아둔 것)이다 — 자동매수의 유효 기간(watch.days)이 거래일로
     셀 것을 요구하므로(달력일로 세면 연휴마다 거짓 만료가 난다,
     trading_calendar.py 모듈 독스트링 참조) 이 함수에도 그대로 필요하다.
 

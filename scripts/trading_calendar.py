@@ -51,7 +51,7 @@ def too_short(days: list, need: int) -> bool:
 
 
 def watch_deadline(days_list: list, watch_date: str, n: int) -> str | None:
-    """지정가 관찰(watch)이 살아있는 마지막 거래일 — 이 날짜까지 목표가에
+    """자동매수(op: watch)이 살아있는 마지막 거래일 — 이 날짜까지 목표가에
     안 닿으면 만료다.
 
     `watch_date` 당일은 세지 않는다 — 관찰은 장 마감 뒤에 등록되므로

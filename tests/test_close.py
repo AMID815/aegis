@@ -783,7 +783,7 @@ def test_일봉이_멀쩡하면_받아둔_봉을_그대로_넘긴다(monkeypatch
     assert isinstance(got["bars"], dict)
     assert "005930" in got["bars"]
     assert got["day"] == ALL_DAYS[-1]       # 확정 대상 거래일이 넘어간다
-    # 지정가 관찰의 기한(watch.days)이 거래일로 셀 것을 요구한다 —
+    # 자동매수의 유효 기간(watch.days)이 거래일로 셀 것을 요구한다 —
     # close.py 가 이미 받아둔 거래일 달력을 새로 조회하지 않고 그대로
     # 넘기는지 확인한다(일봉을 재사용하는 것과 같은 이유).
     assert got["days"] == ALL_DAYS

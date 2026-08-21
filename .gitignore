@@ -10,3 +10,8 @@ docs/
 # wrangler 로컬 상태·계정 캐시 — wrangler-account.json 에 계정 이메일이 들어간다.
 # 공개 저장소이므로 절대 커밋하지 않는다.
 .wrangler/
+
+# 토큰·자격증명 원본. 실수로 커밋되는 것을 막는다 — 2026-08-21 에
+# git add -A 로 실제로 쓸려 들어가 깃허브 푸시 보호가 막았다.
+env.txt
+*.env

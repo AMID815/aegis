@@ -31,7 +31,7 @@ SCHEMA = 1
 CODE_RE = re.compile(r"^[0-9A-Z]{6}\Z")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 OPEN, CLOSED, PENDING, EXPIRED = "open", "closed", "pending", "expired"
-# 지정가 관찰의 기본 관찰 기간(거래일) — 사용자가 3에서 5로 조정했다
+# 자동매수의 기본 유효 기간(거래일) — 사용자가 3에서 5로 조정했다
 # (2026-08-21). 상수 하나로 뽑아둔 이유: normalize() 도 이제(CHANGE 2,
 # 아래 _watch_sane/normalize 참조) days 가 없는 옛 기록에 같은 기본값을
 # 채워 넣는다 — apply_watch(쓰기 시점 기본값)와 normalize(읽기 시점 채움)
@@ -125,7 +125,7 @@ def _orders_sane(ords: dict, buys: list) -> bool:
 
 
 def _watch_days(v):
-    """지정가 관찰의 기한(거래일 수) — 없으면 기본 WATCH_DAYS_DEFAULT(5),
+    """자동매수의 유효 기간(거래일 수) — 없으면 기본 WATCH_DAYS_DEFAULT(5),
     있으면 1~60 사이의 진짜 정수만 받는다.
 
     상한 60 은 "60거래일이면 분 단위로 정확하다"는 보장이 아니다 —
@@ -140,14 +140,14 @@ def _watch_days(v):
     if v is None:
         return WATCH_DAYS_DEFAULT
     if isinstance(v, bool) or not isinstance(v, int):
-        raise RejectedError(f"관찰 기간이 정수가 아님: {v!r}")
+        raise RejectedError(f"유효 기간이 정수가 아님: {v!r}")
     if not (1 <= v <= 60):
-        raise RejectedError(f"관찰 기간이 범위를 벗어남(1~60): {v!r}")
+        raise RejectedError(f"유효 기간이 범위를 벗어남(1~60): {v!r}")
     return v
 
 
 def _watch_sane(w) -> bool:
-    """저장된 지정가 관찰(watch)이 쓸 수 있는 모양인가 — normalize 전용 검사.
+    """저장된 자동매수(op: watch)이 쓸 수 있는 모양인가 — normalize 전용 검사.
 
     `_orders_sane` 의 buy2/buy3 검사와 같은 스타일(정수·양수·bool 아님)을
     쓴다 — `watch.price` 는 apply_watch_fill 이 그대로 체결가로 쓰고,
@@ -285,7 +285,7 @@ def normalize(raw, dropped=None) -> dict:
             if dropped is not None:
                 dropped.append(p)
             continue
-        # pending(지정가 관찰)과 expired(그 관찰이 기한을 넘겨 만료됨)는
+        # pending(자동매수)과 expired(그 관찰이 기한을 넘겨 만료됨)는
         # 둘 다 아직 안 산 기록이라 buys 가 비어 있다 — 그걸 손상으로 보고
         # 격리하면 대기 주문/만료 기록이 통째로 사라진다. 반대로 둘 다
         # 아닌데 비어 있으면 여전히 손상이다(얼마에 샀는지조차 모르는 기록).
@@ -454,7 +454,7 @@ def apply_buy(state: dict, req: dict) -> dict:
 
 
 def apply_watch(state: dict, req: dict) -> dict:
-    """지정가 관찰 — 그 가격에 닿을 때 1차 매수가 체결되는 대기 기록.
+    """자동매수 — 그 가격에 닿을 때 1차 매수가 체결되는 대기 기록.
 
     아직 아무것도 안 샀으므로 `buys` 는 비어 있고 `status` 는 "pending"
     이다. 체결되면 apply_watch_fill 이 1차 매수로 바꾸고 그 시점에

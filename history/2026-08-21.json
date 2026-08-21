@@ -1,0 +1,29 @@
+{
+ "closes": {
+  "001210": 8380
+ },
+ "date": "2026-08-21",
+ "positions": [
+  {
+   "adjustments": [],
+   "auto": true,
+   "buys": [],
+   "code": "001210",
+   "exits": [],
+   "id": "20260821-001210",
+   "memo": "",
+   "name": "금호전기",
+   "observed_at": null,
+   "orders": {},
+   "signal_date": null,
+   "source": "상단눌림",
+   "status": "pending",
+   "watch": {
+    "date": "2026-08-21",
+    "days": 5,
+    "price": 7500
+   }
+  }
+ ],
+ "price_basis": "asof-fetch"
+}

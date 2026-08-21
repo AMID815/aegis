@@ -1,4 +1,29 @@
 {
- "positions": [],
+ "positions": [
+  {
+   "adjustments": [],
+   "auto": true,
+   "buys": [
+    {
+     "date": "2026-08-21",
+     "price": 280000
+    }
+   ],
+   "code": "005930",
+   "exits": [],
+   "id": "20260821-005930",
+   "memo": "",
+   "name": "삼성전자",
+   "observed_at": null,
+   "orders": {
+    "buy2": 263000,
+    "buy3": 246000,
+    "customized": false
+   },
+   "signal_date": null,
+   "source": "상단눌림",
+   "status": "open"
+  }
+ ],
  "schema": 1
 }

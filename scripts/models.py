@@ -107,7 +107,29 @@ def _orders_sane(ords: dict, buys: list) -> bool:
 
     비어 있는 `{}` 는 여기 오지 않는다(호출부가 거른다) — 아직 사다리가
     안 잡힌 정상 기록이다.
+
+    **결함3(2026-08-21 감사, 실측 재현)**: `buys` 가 비었는데 `ords` 가
+    차 있는 조합은 그 자체로 격리해야 한다 — 이전에는 "1차가 대조"(아래
+    `first` 비교)만 `buys and ...` 로 건너뛰고 나머지(정수·순서) 검사는
+    그대로 통과시켰다. `buys` 가 비었다는 건 pending/expired(아직 한 번도
+    안 삼)라는 뜻인데(정상 OPEN/CLOSED 기록이 buys 비면 이 함수에 오기 전
+    이미 격리된다 — 위 `never_bought` 분기 참조), 그런 기록에 사다리가
+    있으면 애초에 "1차가 대비 몇 %"라는 정의 자체가 성립하지 않는다.
+    정상 경로로는 이 조합이 절대 안 생긴다 — `apply_watch` 는 pending 을
+    항상 `orders: {}` 로 만들고, `apply_watch_fill` 이 `orders` 를 채우는
+    바로 그 순간 `status` 도 원자적으로 OPEN 이 된다. 그래서 이 모양은
+    손편집 흔적뿐이다.
+
+    이걸 놓치면 이 기록이 `candidates()`/`touched()` 까지 살아남아
+    `orders.take_profit([])` → `orders.average([])` 의 `ValueError` 가
+    `close.main()` 밖으로 새어나간다(감사가 end-to-end 로 재현 —
+    tests/test_autofill.py 의 관련 테스트 참조). `normalize()` 가
+    `bad`(dropped)로 이 기록을 잡으면 run()/main() 이 이미 갖고 있는
+    "손상 항목이 있으면 그날은 아무것도 안 쓴다" 전제(모듈 최상단 문서)를
+    그대로 타서, 크래시 대신 로그 한 줄과 함께 안전하게 멈춘다.
     """
+    if not buys:
+        return False
     for k in ("buy2", "buy3"):
         v = ords.get(k)
         # bool 은 파이썬에서 int 다 — True 가 1원짜리 주문가로 통과한다.
@@ -115,7 +137,7 @@ def _orders_sane(ords: dict, buys: list) -> bool:
             return False
     if ords["buy3"] >= ords["buy2"]:
         return False   # 물타기는 아래로만 간다
-    if buys and isinstance(buys[0], dict):
+    if isinstance(buys[0], dict):
         first = buys[0].get("price")
         if isinstance(first, int) and ords["buy2"] >= first:
             return False   # 2차가 1차보다 높으면 매수 즉시 체결된다

@@ -1100,19 +1100,30 @@ def test_멀쩡한_orders_는_통과한다(ok):
     assert len(good) == 1 and dropped == []
 
 
-def test_buys가_없으면_1차가_대조는_건너뛴다():
-    """자동매수(Task 12)은 아직 안 산 기록이라 1차가와 대조할 게 없다.
-    그래도 사다리 자체의 모양(정수·순서)은 본다."""
+def test_buys가_없는데_orders가_있으면_격리한다():
+    """결함3(2026-08-21 감사, 실측 재현) — 이 테스트는 뒤집혔다.
+
+    이전 이름(`test_buys가_없으면_1차가_대조는_건너뛴다`)이 고정하던 동작은
+    "자동매수는 아직 안 산 기록이라 1차가와 대조할 게 없으니, 사다리 자체
+    모양(정수·순서)만 보고 통과시킨다"였다. 그런데 buys 가 비었다는 건
+    (pending/expired) "1차가 대비 몇 %"라는 사다리의 정의 자체가 성립하지
+    않는다는 뜻이다 — 대조를 건너뛸 게 아니라 그 조합 자체를 격리해야
+    했다.
+
+    이 기록이 그대로 candidates()/touched() 까지 살아남으면
+    orders.take_profit([]) → orders.average([]) 의 ValueError 가
+    close.main() 밖으로 새어나간다(감사가 end-to-end 로 재현 —
+    tests/test_autofill.py 의 손편집_orders 테스트 참조). 정상 경로로는
+    이 모양이 안 생긴다 — apply_watch 는 pending 을 항상 orders={} 로
+    만들고, apply_watch_fill 이 orders 를 채우는 순간 status 도 원자적으로
+    OPEN 이 된다."""
     dropped = []
     st = models.normalize({"schema": 1, "positions": [{
         "code": "005930", "buys": [], "status": "pending",
         "watch": {"price": 240000, "date": "2026-08-20", "days": 3},
         "orders": {"buy2": 94000, "buy3": 88000}}]}, dropped)
-    # pending 은 buys 가 비어 있어도 더 이상 격리되지 않는다(Task 12) —
-    # 여기서 확인하는 건 orders 검증이 buys[0] 대조를 건너뛰고도(빈
-    # 리스트라 대조할 첫 매수가가 없다) KeyError 없이 통과한다는 것이다.
-    assert len(st["positions"]) == 1
-    assert dropped == []
+    assert st["positions"] == []
+    assert len(dropped) == 1
 
 
 # ── Task 9: buys[1:](자동 체결)도 buys[0] 와 같은 기준으로 본다 ──────────

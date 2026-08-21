@@ -18,6 +18,23 @@ close.py 가 하루 한 번 부른다. 계산은 전부 orders.py 에 있고, �
 그때 filled 에는 이미 그날 체결된 매수가 들어 있어서, 관측 시각부터
 재생하면 체결 이전 분봉이 **내려간 익절선**으로 평가된다 — 떨어지는
 종목이 +5.3% 승리로 기록된다(2026-08-20 실측 재현). since_for() 참조.
+
+**등록일 당일은 체결 대상이 아니다(결함1, 2026-08-21 감사 재현).**
+watch 는 장 마감 뒤에 등록되므로, 등록일의 분봉은 그 워치가 존재하기 전
+시각이다 — 15:41 KST 에 등록된 워치(7900원)가 같은 날 09:00 분봉으로
+소급 체결되는 사고가 실측됐다(등록 6시간 41분 전). `trading_calendar.
+watch_deadline()` 은 이미 등록일 당일을 안 세고 다음 거래일부터 만료
+기한을 센다 — 체결 판정도 같은 기준을 써야 한다(아래 pending 루프의
+`day <= watch["date"]` 가드). 두 절반이 어긋나면 등록 당일치가 소급
+체결된다.
+
+**분봉 창은 약 7거래일이다(결함2, 2026-08-21 감사).** `close.main()` 이
+놓친 거래일을 뒤늦게 캐치업하려 들면, 그 날짜가 이미 이 창을 벗어나
+있을 수 있다 — naver.fetch_minute 은 그때 영구히 빈 응답을 준다(재시도로
+해결 안 됨). 그런 날은 분봉을 기다리지 않고 일봉 하나를 "분봉 하나"처럼
+`orders.replay`/직접 대조에 넘겨 확정한다 — 설계 §9("하루 안에 손절선·
+익절선을 둘 다 스치면 손절로 본다")와 같은 태도이고, 그 사실을
+`minute_verified=False` 로 남긴다. `_minute_window_open()` 참조.
 """
 from __future__ import annotations
 
@@ -25,6 +42,29 @@ from . import gh, models, naver, orders
 from . import trading_calendar as cal
 
 POSITIONS = "positions.json"
+
+# 실측(naver.py, 2026-08-20): 분봉 API(api.stock.naver.com)는 최근 약
+# 7거래일만 응답한다. 그보다 오래된 날짜는 EmptyParseError(빈 응답) —
+# 네트워크 재시도로 해결되지 않는, 영구적인 데이터 부재다.
+MINUTE_WINDOW_DAYS = 7
+
+
+def _minute_window_open(day: str, days_list: list) -> bool:
+    """`day` 의 분봉을 아직 기대할 수 있는가.
+
+    `days_list` 의 마지막 날을 "오늘"의 대용으로 쓴다 — close.py 가
+    `latest = days[-1]` 을 오늘로 쓰는 관례와 같다.
+
+    판단 근거가 없으면(달력이 비었거나 `day` 가 달력 밖) True 를 돌려준다
+    — "창이 닫혔다"고 함부로 단정하지 않는다(`trading_calendar.held_days`
+    가 클램프 대신 None 을 돌려주는 것과 같은 태도). 그 경우 평소처럼
+    `fetch_minute` 을 시도해보고, 실패하면 그 종목만 건너뛴다(다음 실행이
+    재시도 — 창이 아직 열려 있을 수도 있으니 영구 포기하지 않는다).
+    """
+    if not days_list:
+        return True
+    age = cal.held_days(days_list, day, days_list[-1])
+    return age is None or age <= MINUTE_WINDOW_DAYS
 
 
 def candidates(state: dict) -> list:
@@ -174,20 +214,55 @@ def run(bars: dict, day: str, days_list: list) -> int:
             state = out
             continue
 
+        # 등록일 당일은 아직 체결 대상이 아니다(결함1, 2026-08-21 감사).
+        # watch 는 장 마감 뒤에 등록되므로, 등록일의 분봉은 그 워치가
+        # 존재하기 전 시각이다 — 실측: 15:41 KST 등록된 워치(7900원)가
+        # 같은 날 09:00 분봉으로 소급 체결됐다(등록 6시간 41분 전). 위
+        # watch_deadline() 이 등록일 당일을 안 세고 다음 거래일부터 기한을
+        # 세는 것과 대칭이어야 한다 — 두 절반이 어긋나면 등록 당일치가
+        # 소급 체결된다. 이 스크리너들은 거의 다 장 마감(15:00) 이후에
+        # 등록하므로 이 가드는 매일 조용히(로그 없이) 걸린다 — 정상
+        # 무동작이지 오류가 아니다.
+        if day <= watch["date"]:
+            continue
+
         bar = bars.get(p["code"], {}).get(key)
-        if bar is None or bar["low"] > watch["price"]:
+        if bar is None:
+            # 결함4(2026-08-21 감사): "안 닿음"과 "판정 자체를 못 했다"를
+            # 같은 continue 로 뭉치면 안 된다 — 이 코드의 일봉이 아예 빠진
+            # 것(예: close.py 가 대기 종목의 일봉을 안 받아온 사고, 이미
+            # 한 번 실측됨)은 눈에 띄어야 한다.
+            print(f"[경고] 일봉 없음 {p['code']} {day} — 대기 체결 판정 불가")
             continue
-        try:
-            minutes = naver.fetch_minute(p["code"], day)
-        except Exception as e:
-            print(f"[경고] 분봉 실패 {p['code']} {day}: {type(e).__name__}: {e} — 건너뛴다")
-            continue
-        hit = next((m for m in minutes if m["low"] <= watch["price"]), None)
-        if hit is None:
-            continue
+        if bar["low"] > watch["price"]:
+            continue    # 정상 무터치 — 조용히 넘어간다
+
+        if _minute_window_open(day, days_list):
+            try:
+                minutes = naver.fetch_minute(p["code"], day)
+            except Exception as e:
+                print(f"[경고] 분봉 실패 {p['code']} {day}: {type(e).__name__}: {e} — 건너뛴다")
+                continue
+            hit = next((m for m in minutes if m["low"] <= watch["price"]), None)
+            if hit is None:
+                # 결함4: 일봉 저가가 이미 목표가 이하로 찍혔다고 방금
+                # 확인했는데(위) 분봉 어디에도 그 가격이 없다 — 두 데이터
+                # 출처가 모순된다. 조용히 넘기면 이 모순 자체가 사라진다.
+                print(f"[경고] 일봉·분봉 불일치 {p['code']} {day}: "
+                      f"일봉 저가({bar['low']})가 목표가({watch['price']}) 이하인데 분봉에서 확인 안 됨")
+                continue
+            t = hit["t"]
+        else:
+            # 결함2: 분봉 창(약 7거래일)을 이미 넘겼다 — 다시 시도해도
+            # 영구히 빈 응답이 온다. 일봉 저가가 목표가 도달을 이미
+            # 증명했으므로(위에서 확인), 체결 시각은 그날 15:30 관측으로
+            # 간주한다(관측 시각을 모르는 옛 기록과 같은 관례 —
+            # since_for() 참조).
+            t = f"{key}1530"
+            print(f"  분봉 창 밖 — 일봉만으로 지정가 체결 확정: {p['name']} {day}")
         try:
             fresh, fresh_sha = gh.read_json(POSITIONS, default=models.empty_state())
-            out = models.apply_watch_fill(models.normalize(fresh), p["id"], day, hit["t"])
+            out = models.apply_watch_fill(models.normalize(fresh), p["id"], day, t)
             gh.write_json(POSITIONS, out, fresh_sha, f"지정가 체결: {p['name']}")
         except Exception as e:
             print(f"[경고] 지정가 체결 쓰기 실패 {p['id']}: {type(e).__name__}: {e}")
@@ -199,24 +274,48 @@ def run(bars: dict, day: str, days_list: list) -> int:
     for p in candidates(state):
         bar = bars.get(p["code"], {}).get(key)
         if bar is None:
+            # 결함4(2026-08-21 감사): 이 코드의 일봉이 아예 없는 것과
+            # "안 닿았다"는 전혀 다른 상황이다 — 정확히 이 모양의 결손이
+            # (close.py 가 종목 하나의 일봉을 안 받아온 것) 기능이 나온
+            # 이후 한동안 안 들키고 넘어갔었다. 조용한 continue 로 뭉치지
+            # 않는다.
+            print(f"[경고] 일봉 없음 {p['code']} {day} — 자동 체결 판정 불가")
             continue
         filled = filled_prices(p)
         if not touched(bar, p["orders"], filled):
-            continue
+            continue    # 정상 무터치 — 조용히 넘어간다
 
-        try:
-            minutes = naver.fetch_minute(p["code"], day)
-        except Exception as e:
-            # 분봉 창(약 7거래일)을 넘겼거나 네트워크 실패다. 한 종목의
-            # 실패가 나머지 종목의 체결까지 막으면 안 된다. 읽기 실패라
-            # 종료코드는 더럽히지 않는다 — 다음 실행이 다시 잡는다.
-            print(f"[경고] 분봉 실패 {p['code']} {day}: {type(e).__name__}: {e} — 건너뛴다")
-            continue
+        if _minute_window_open(day, days_list):
+            try:
+                minutes = naver.fetch_minute(p["code"], day)
+            except Exception as e:
+                # 창 안인데도 실패했다 — 네트워크 문제일 가능성이 크다.
+                # 한 종목의 실패가 나머지 종목의 체결까지 막으면 안 된다.
+                # 읽기 실패라 종료코드는 더럽히지 않는다 — 다음 실행이
+                # 다시 잡는다(아직 창 안이라 복구될 여지가 있다).
+                print(f"[경고] 분봉 실패 {p['code']} {day}: {type(e).__name__}: {e} — 건너뛴다")
+                continue
 
-        # `since` 가 이 호출의 핵심 방어다 — since_for() 독스트링 참조.
-        # 저장된 사다리(p["orders"])를 그대로 넘긴다. 1차가로부터 다시
-        # 계산하면 사용자가 지정한 customized 사다리가 무시된다.
-        fills = orders.replay(p["orders"], filled, minutes, since=since_for(p))
+            # `since` 가 이 호출의 핵심 방어다 — since_for() 독스트링 참조.
+            # 저장된 사다리(p["orders"])를 그대로 넘긴다. 1차가로부터 다시
+            # 계산하면 사용자가 지정한 customized 사다리가 무시된다.
+            fills = orders.replay(p["orders"], filled, minutes, since=since_for(p))
+            minute_verified = True
+        else:
+            # 결함2: 분봉 창(약 7거래일)을 이미 넘겼다 — fetch_minute 을
+            # 시도해도 영구히 빈 응답이라 헛수고다. 일봉 OHLC 하나를
+            # "분봉 하나"처럼 orders.replay 에 넘긴다 — replay() 는 이미
+            # 한 틱 안에서 매수 먼저·(둘 다 스치면) 손절 우선의 순서를
+            # 지키므로(그 docstring 참조), 하루 전체를 한 틱으로 압축해도
+            # 설계 §9("승률을 부풀리지 않는 쪽")와 같은 결과가 나온다.
+            # 시각 정보가 없어 그날 15:30 관측으로 간주한다(pending 루프,
+            # since_for() 와 같은 관례).
+            fills = orders.replay(p["orders"], filled,
+                                  [{"t": f"{key}1530", "high": bar["high"], "low": bar["low"]}],
+                                  since=since_for(p))
+            minute_verified = False
+            if fills:
+                print(f"  분봉 창 밖 — 일봉만으로 체결 확정: {p['name']} {day}")
         if not fills:
             continue
 
@@ -224,7 +323,8 @@ def run(bars: dict, day: str, days_list: list) -> int:
         # 읽는다 — 다른 워크플로(intake)가 그 사이에 썼을 수 있다.
         try:
             fresh, fresh_sha = gh.read_json(POSITIONS, default=models.empty_state())
-            out = models.apply_fills(models.normalize(fresh), p["id"], fills, day)
+            out = models.apply_fills(models.normalize(fresh), p["id"], fills, day,
+                                     minute_verified=minute_verified)
             gh.write_json(POSITIONS, out, fresh_sha,
                           f"자동체결: {p['name']} ({len(fills)}건)")
         except models.AlreadyApplied:

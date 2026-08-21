@@ -123,6 +123,18 @@ form { display:flex; flex-wrap:wrap; gap:8px; align-items:flex-end; }
 input, select, button { padding:8px; font-size:1rem; background:var(--bg);
                         color:var(--fg); border:1px solid var(--line); border-radius:4px; }
 button { cursor:pointer; }
+/* 쓰기 진행 중(app.js WRITE_LOCKED_IDS/FORM_BUSY) — 버튼은 disabled 만으로
+   이미 클릭이 막히지만, 평소 회색과 구분이 안 되면 "고장났나" 로 읽힌다
+   (지시문: "고장이 아니라 의도된 것으로 읽히게"). 행 버튼(고치기/전환/삭제/
+   저장)은 이 opacity·cursor 만으로 충분하다 — "[처리 중]" 표시는
+   renderTable() 이 이름 옆에 따로 붙인다(min-width:68px 로 이미 맞춘 버튼
+   폭을 텍스트 변경으로 다시 흔들지 않기 위해서다, 위 .amend-btn 주석
+   참조). #submit-btn 은 이름표가 없는 단일 버튼이라 ::after 로 문구를
+   덧붙인다 — textContent 는 건드리지 않는다: applyMode() 가 모드마다
+   #submit-btn.textContent 를 다시 정하는데(저장/매도 저장/자동매수 등록/
+   고치기 반영), 여기서 textContent 를 직접 바꾸면 그 배선과 다툰다. */
+button:disabled { opacity:.55; cursor:not-allowed; }
+#submit-btn.busy::after { content:" (처리 중…)"; }
 .hint { color:var(--dim); font-size:.85rem; }
 /* #result — 제출 결과(성공/폴백/막힘, app.js renderResult()). .stale/.mode 와
    같은 "색 배지 + 흰 글씨" 패턴을 그대로 따른다 — 화면에 새 시각 언어를

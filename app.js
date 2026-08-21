@@ -594,6 +594,11 @@ function nameCell(tr, r, mark) {
   // append 해도 레이아웃엔 해가 없다.
   const actions = document.createElement("div");
   actions.className = "name-actions";
+  // 쓰기 진행 중(WRITE_LOCKED_IDS, 위 선언부 주석) — EXPANDED_IDS 와 같은
+  // 방식으로 매 렌더마다 이 Set 을 그대로 읽는다. 펼침 토글(nameEl)은
+  // 잠그지 않는다 — 지시문: "행은 계속 펼칠 수 있어야 한다, 쓰기 컨트롤만
+  // 잠근다."
+  const locked = WRITE_LOCKED_IDS.has(r.p.id);
 
   if (!r.bad && typeof r.p.id === "string" && r.p.id) {
     // 대기(pending)·만료(expired) 기록에는 고치기를 달지 않는다. 달면
@@ -610,6 +615,7 @@ function nameCell(tr, r, mark) {
     btn.textContent = "고치기";
     btn.dataset.id = r.p.id;
     btn.setAttribute("aria-label", "고치기: " + (r.p.name || r.p.code || "?"));
+    btn.disabled = locked;
     actions.appendChild(btn);
     }
 
@@ -628,6 +634,7 @@ function nameCell(tr, r, mark) {
       toggleBtn.setAttribute("aria-label",
         (r.auto === false ? "자동 매매로 전환: " : "자동 매매 예외(수동)로 전환: ")
         + (r.p.name || r.p.code || "?"));
+      toggleBtn.disabled = locked;
       actions.appendChild(toggleBtn);
     }
   }
@@ -648,6 +655,7 @@ function nameCell(tr, r, mark) {
     delBtn.textContent = "삭제";
     delBtn.dataset.id = r.p.id;
     delBtn.setAttribute("aria-label", "삭제: " + (r.p.name || r.p.code || "?"));
+    delBtn.disabled = locked;
     actions.appendChild(delBtn);
   }
   if (actions.childElementCount) wrap.appendChild(actions);
@@ -705,6 +713,10 @@ function renderTable(id, list, quotes) {
       if (r.halted) flags.push("거래정지");
       if (flags.length) mark = " (" + flags.join(", ") + ")";
     }
+    // 쓰기 진행 중 표시(WRITE_LOCKED_IDS) — bad/pending/expired/mismatch 등
+    // 다른 표시와 동시에 나올 수 있다(예: 대기 중인 자동매수 기록을
+    // 삭제하는 중) — 위 else-if 사슬 밖에서 독립적으로 덧붙인다.
+    if (WRITE_LOCKED_IDS.has(r.p.id)) mark += " [처리 중]";
     nameCell(tr, r, mark);
     cell(tr, fmt(r.buy));
     cell(tr, fmt(r.now));
@@ -949,6 +961,10 @@ function renderExpiredDetail(p) {
 function renderOrdersAmendForm(p) {
   const wrap = document.createElement("div");
   wrap.className = "detail-amend-orders";
+  // 쓰기 진행 중(WRITE_LOCKED_IDS) — 이 폼 자신이 "orders" 쓰기를 낸다
+  // (onOrdersSaveButtonClick). nameCell 의 고치기/토글/삭제와 같은 기준
+  // (모듈 전역 Set)을 그대로 읽는다.
+  const locked = WRITE_LOCKED_IDS.has(p.id);
 
   const heading = document.createElement("div");
   heading.className = "detail-amend-heading";
@@ -965,6 +981,7 @@ function renderOrdersAmendForm(p) {
     input.inputMode = "numeric";
     input.className = cls;
     input.value = typeof value === "number" ? String(value) : "";
+    input.disabled = locked;
     field.appendChild(label);
     field.appendChild(input);
     return field;
@@ -979,6 +996,7 @@ function renderOrdersAmendForm(p) {
   saveBtn.className = "orders-save-btn";
   saveBtn.textContent = "저장";
   saveBtn.dataset.id = p.id;
+  saveBtn.disabled = locked;
   wrap.appendChild(saveBtn);
 
   return wrap;
@@ -1249,6 +1267,76 @@ let EXPANDED_IDS = new Set();
 // 실패는 최초 로드와 무관한 별개의 사실이라 renderRefreshStatus 가 이미
 // 그 상황을 따로 알린다 — 항목 20 참조).
 let LOAD_FLAGS = { positionsFailed: false, quotesFailed: false };
+
+// ── 쓰기 진행 중 잠금(신규) ──────────────────────────────────────────────
+//
+// 저장은 비동기다 — 화면이 Worker 에 POST 하면 Worker 가 깃허브 이슈를
+// 열고, 그 이슈가 워크플로를 발동시키고, 워크플로가 positions.json 에
+// 커밋한다. 그 왕복이 3~20초 걸리는 동안(refreshAfterWrite 옆 주석) 행은
+// 버튼이 살아있는 채로 화면에 그대로 남는다 — 사용자가 "안 눌렸나" 싶어
+// 삭제를 다시, 또 다시 누른다. 실제 사고: 이슈 #22/#23(달바글로벌),
+// #24/#25(코스맥스), #26, 더 앞선 #6/#7 — 전부 삭제 중복 클릭이다.
+// 서버(apply_delete)는 두 번째 요청을 "대상 없음"으로 정확히 거절하지만,
+// Worker 가 그 요청도 이슈로 먼저 열어버린 뒤라(이슈를 열고 나서야
+// intake.yml 이 거절한다) 사용자가 매번 그 이슈를 손으로 닫아야 했다.
+// 서버 거절 자체는 옳다 — 고쳐야 할 곳은 화면이 애초에 두 번째 요청을
+// 보내지 않는 것이다(지시문).
+//
+// 행 단위(삭제·자동/수동 전환·지정가 수정)와 폼 단위(매수/매도/자동매수/
+// 고치기 제출)를 서로 다른 자료구조로 잠근다 — 아래 FORM_BUSY 옆 주석이
+// 그 이유를 설명한다.
+
+// 쓰기 진행 중인 기록 id 집합 — EXPANDED_IDS 와 같은 이유로 모듈 전역에
+// 둔다: refreshAfterWrite() 가 저장 몇 초~수십 초 뒤 STATE 를 갈아끼우며
+// renderData() 로 표 전체(tbody)를 다시 그리는데(항목 20), 잠금 여부를
+// DOM 속성(버튼의 disabled 등)에만 의존하면 그 재렌더가 새로 만든 버튼은
+// 잠금 이전 상태로 돌아간다 — 마침 그 순간 두 번째 클릭이 들어오면 다시
+// 열린 창이 된다. renderTable/nameCell/renderOrdersAmendForm 이 매
+// 렌더마다 이 Set 을 다시 읽으므로(EXPANDED_IDS 와 같은 패턴), 재렌더
+// 횟수와 무관하게 이 Set 자체를 안 건드리면 잠금이 그대로 남는다.
+let WRITE_LOCKED_IDS = new Set();
+
+function lockWrite(id) {
+  WRITE_LOCKED_IDS.add(id);
+  renderData(STATE, QUOTES, LOAD_FLAGS);   // 버튼 disabled·"[처리 중]" 표시를 그 자리에서 바로 반영
+}
+
+// writeRecord() 가 이 기록의 쓰기 결과가 확정된 뒤(반영 확인, 반영 포기,
+// 또는 실패) 부른다 — writeRecord 옆 주석 참조. 모든 경로가 반드시 이걸
+// 불러야 한다: 잠긴 채로 영원히 남으면 이 기능이 고치려는 중복 제출
+// 버그보다 나쁘다(지시문).
+function unlockWrite(id) {
+  WRITE_LOCKED_IDS.delete(id);
+  renderData(STATE, QUOTES, LOAD_FLAGS);
+}
+
+// 폼(매수/매도/자동매수/고치기) 제출 중 플래그 — 위 WRITE_LOCKED_IDS 와
+// 목적은 같지만(쓰기 왕복 동안 다시 못 누르게) 자료구조가 다르다:
+// WRITE_LOCKED_IDS 는 "이미 positions.json 에 있는 기록"을 id 로 가리켜
+// 잠그는데, 신규 매수는 이 시점에 아직 그 기록 자체가 없다(Worker 가
+// 이슈를 열고 intake.yml 이 커밋해야 비로소 id 가 생긴다) — 잠글 대상
+// id 가 없으니 Set 에 넣을 값도 없다. 그래서 "지금 이 폼에서 뭔가 쓰기
+// 왕복이 진행 중이다"라는 사실 하나만 boolean 으로 잡는다 — 매수/매도/
+// 자동매수/고치기 네 모드가 전부 같은 #submit-btn 하나를 공유하므로
+// (applyMode) 이걸로 충분하고, 매도·고치기처럼 이미 id 가 있는 경우까지
+// 굳이 WRITE_LOCKED_IDS 로 쪼개 관리할 실익도 없다(제출 버튼은 어차피
+// 하나뿐이라 "폼 전체가 바쁘다"가 곧 "이 버튼을 다시 누르면 안 된다"와
+// 같다).
+let FORM_BUSY = false;
+
+function lockForm() {
+  FORM_BUSY = true;
+  const btn = document.getElementById("submit-btn");
+  if (btn) { btn.disabled = true; btn.classList.add("busy"); }
+}
+
+// writeRecord() 가 이 제출의 결과가 확정된 뒤 부른다 — unlockWrite() 와
+// 같은 시점 규칙(성공은 refreshAfterWrite() 가 끝난 뒤, 폴백/실패는 즉시).
+function releaseFormBusy() {
+  FORM_BUSY = false;
+  const btn = document.getElementById("submit-btn");
+  if (btn) { btn.disabled = false; btn.classList.remove("busy"); }
+}
 
 // Task 15: amend 모드 상태. null 이면 매입/매도 모드(#q 로 암묵 전환).
 // 값이 있으면 amend 모드 — #q 를 바꿔도 매입/매도로 되돌아가지 않고,
@@ -1533,6 +1621,10 @@ function clearExtraSourceOptions() {
 function onAmendButtonClick(e) {
   const btn = e.target.closest(".amend-btn");
   if (!btn) return;
+  // 버튼 disabled 로 보통 여기 닿지 않지만, 방어적으로 한 번 더 막는다 —
+  // 쓰기 진행 중인 기록은 고치기도 잠근다(지시문 요구사항 5: 한 기록엔
+  // 한 번에 하나의 쓰기만).
+  if (WRITE_LOCKED_IDS.has(btn.dataset.id)) return;
   startAmend(btn.dataset.id);
 }
 
@@ -1546,6 +1638,10 @@ function onAutoToggleButtonClick(e) {
   const btn = e.target.closest(".auto-toggle-btn");
   if (!btn) return;
   const id = btn.dataset.id;
+  // 버튼 disabled 의 방어적 재확인 — 이미 이 기록에 다른 쓰기가 진행
+  // 중이면 여기서도 막는다(지시문 요구사항 5: 한 기록엔 한 번에 하나의
+  // 쓰기만).
+  if (WRITE_LOCKED_IDS.has(id)) return;
   const code = btn.dataset.code;
   const nextAuto = btn.dataset.nextAuto === "true";
   const p = STATE.positions.find(x => x.id === id);
@@ -1554,14 +1650,20 @@ function onAutoToggleButtonClick(e) {
     ? "\"" + name + "\" 을(를) 다시 자동 매매로 되돌릴까요? (물타기·익절·손절이 다시 자동으로 걸립니다)"
     : "\"" + name + "\" 을(를) 수동으로 전환할까요? (물타기·익절·손절이 모두 멈춥니다)";
   if (!confirm(question)) return;
+  // 쓰기를 보내는 바로 그 순간 잠근다(지시문 요구사항 1) — confirm() 뒤에
+  // 두는 이유: confirm() 은 취소될 수 있는데, 그 앞에서 잠그면 취소한
+  // 사용자의 버튼이 이유 없이 잠긴 채로 남는다.
+  lockWrite(id);
   // await 하지 않는다 — writeRecord() 의 첫 줄(window.open)이 아직 이
   // 클릭 이벤트와 같은 동기 구간 안에서 실행돼야(async 함수는 첫 await
   // 전까지 호출자와 같은 태스크에서 그대로 실행된다) 팝업 차단을 피할 수
   // 있다(onSubmit 옆 주석과 같은 요령). 실패해도 결과는 renderResult()가
   // 화면에 남기고, 남는 예외는 전역 unhandledrejection 경계(reportFatal)
-  // 가 받는다.
+  // 가 받는다. 다섯 번째 인자(release)는 writeRecord() 가 이 쓰기의 결과가
+  // 확정된 뒤(성공 반영 확인/포기/실패) 불러 잠금을 푼다.
   writeRecord({ op: "auto", id, was: code, auto: nextAuto },
-              (nextAuto ? "AUTO-ON " : "AUTO-OFF ") + name, name);
+              (nextAuto ? "AUTO-ON " : "AUTO-OFF ") + name, name,
+              undefined, () => unlockWrite(id));
 }
 
 // 삭제 — 이 시스템의 유일한 파괴적 연산이라(models.apply_delete 독스트링)
@@ -1585,6 +1687,9 @@ function onDeleteButtonClick(e) {
   const btn = e.target.closest(".delete-btn");
   if (!btn) return;
   const id = btn.dataset.id;
+  // 버튼 disabled 의 방어적 재확인 — 이미 이 기록에 다른 쓰기(자동/수동
+  // 전환·지정가 수정 등)가 진행 중이면 삭제도 막는다(지시문 요구사항 5).
+  if (WRITE_LOCKED_IDS.has(id)) return;
   const p = STATE.positions.find(x => x.id === id);
   if (!p) {
     alert("이 기록을 표에서 찾을 수 없습니다 — 새로고침 후 다시 시도해주세요.");
@@ -1608,11 +1713,14 @@ function onDeleteButtonClick(e) {
   const question = name + "(" + code + ") " + fmt(price) + "원 기록을 지웁니다.\n\n"
     + "되돌릴 수 없습니다. 계속할까요?";
   if (!confirm(question)) return;
+  // 쓰기를 보내는 순간 잠근다(지시문 요구사항 1, 이슈 #22~#26/#6~#7 재발
+  // 방지) — confirm() 뒤에 두는 이유는 위 onAutoToggleButtonClick 과 같다.
+  lockWrite(id);
   // await 하지 않는다 — onAutoToggleButtonClick 과 같은 팝업 차단 회피
   // 요령(writeRecord() 의 window.open 이 아직 이 클릭 이벤트와 같은 동기
   // 구간 안에서 실행돼야 한다).
   writeRecord({ op: "delete", id, was: code, was_price: price },
-              "DELETE " + name, name);
+              "DELETE " + name, name, undefined, () => unlockWrite(id));
 }
 
 // 상세행 펼침/접힘(신규) — 위임 클릭(제약 2, onAmendButtonClick 과 같은
@@ -1643,6 +1751,8 @@ function onOrdersSaveButtonClick(e) {
   const btn = e.target.closest(".orders-save-btn");
   if (!btn) return;
   const id = btn.dataset.id;
+  // 버튼 disabled 의 방어적 재확인(위 onDeleteButtonClick 과 같은 이유).
+  if (WRITE_LOCKED_IDS.has(id)) return;
   const p = STATE.positions.find(x => x.id === id);
   if (!p || !isReadablePosition(p)) {
     alert("이 기록을 표에서 찾을 수 없습니다 — 새로고침 후 다시 시도해주세요.");
@@ -1658,10 +1768,15 @@ function onOrdersSaveButtonClick(e) {
     return;
   }
   const name = p.name || p.code || "?";
+  // 쓰기를 보내는 순간 잠근다(지시문 요구사항 1) — 이 폼엔 confirm() 이
+  // 없는 대신 위 검증(alert 로 되돌아가는 분기들)을 다 통과한 뒤에야
+  // 여기 닿으므로, 검증 통과가 곧 "실제로 보낼 것이다"의 확정 시점이다.
+  lockWrite(id);
   // await 하지 않는다 — writeRecord() 의 window.open 이 아직 이 클릭
   // 이벤트와 같은 동기 구간 안에서 실행돼야 팝업 차단을 피한다(같은
   // 요령을 쓰는 onAutoToggleButtonClick/onDeleteButtonClick 옆 주석 참조).
-  writeRecord({ op: "orders", id, was: p.code, buy2, buy3 }, "ORDERS " + name, name);
+  writeRecord({ op: "orders", id, was: p.code, buy2, buy3 }, "ORDERS " + name, name,
+              undefined, () => unlockWrite(id));
 }
 
 // id 로 STATE 에서 기록을 찾아 amend 폼을 채운다. **재조회하지 않는다** —
@@ -1858,6 +1973,7 @@ function buildAmendPatch() {
 // 정의 참조) 별도 옵션을 얹지 않아도 강제 재조회가 된다.
 async function onAmendSubmit(ev) {
   ev.preventDefault();
+  if (FORM_BUSY) return;   // onSubmit 과 같은 방어선(지시문 요구사항 4)
   const target = amendTarget;
   if (!target) return;   // 방어적 — submit 리스너가 amendTarget 있을 때만 이걸 부른다
 
@@ -1922,7 +2038,8 @@ async function onAmendSubmit(ev) {
     // writeRecord() 가 정한다 — 아래 finally 는 더 이상 이 탭을 건드리지
     // 않는다(handedOff = true).
     handedOff = true;
-    const result = await writeRecord(patch, title, displayName, pending);
+    lockForm();
+    const result = await writeRecord(patch, title, displayName, pending, releaseFormBusy);
 
     // 점 7 — Worker 로 성공했든 깃허브 폴백으로 넘어갔든, 사용자가 보는
     // 표는 둘 다 아직 이전 값이다(반영은 intake.yml 이 나중에 한다).
@@ -2229,9 +2346,29 @@ async function refreshAfterWrite() {
 // 시점에 아직 제스처가 살아있다) 이 함수 자신의 맨 앞(첫 await 이전)에서
 // 새로 연다 — 여기서 여는 것도 fetch() 호출보다 먼저이기만 하면 같은
 // 이유로 안전하다.
-async function writeRecord(payload, title, display, pending) {
+// `release` (선택, 다섯 번째 인자) — 이 쓰기를 잠근 호출자(행 버튼의
+// lockWrite/unlockWrite, 또는 폼의 lockForm/releaseFormBusy)가 넘기는
+// 인자 없는 콜백. writeRecord() 는 이 쓰기의 결과가 **확정된 뒤에만**
+// 부른다 — 그 전에 풀면 아직 반영되지 않은 낡은 화면을 보면서 사용자가
+// 같은 대상에 또 쓰기를 보낼 수 있다(이 잠금이 막으려는 바로 그 사고,
+// 이슈 #22~#26/#6~#7):
+//   - Worker 성공 → refreshAfterWrite() 가 끝난 뒤(반영을 확인했든
+//     포기했든 — 아래 성공 분기의 결정 주석 참조).
+//   - 깃허브 폴백(not-configured/network) → 그 자리에서 즉시. 실제
+//     반영이 사용자가 새 탭에서 직접 Submit 을 눌러야 시작되므로 이
+//     페이지가 추적할 방법 자체가 없다 — 계속 잠가둘 근거가 없다.
+//   - blocked(auth/http/bad-response/timeout) → 그 자리에서 즉시. 이미
+//     아무 것도 반영되지 않았거나(auth/http/bad-response) 결과를 몰라
+//     자동으로 아무것도 안 하기로 한 경우(timeout, tryWorker 옆 C1 주석)
+//     라 마찬가지로 계속 잠가둘 근거가 없다.
+//   - 예상 못 한 예외 → 아래 finally 가 마지막 안전망이다(지시문: 잠긴
+//     채로 영원히 남는 것이 이 기능이 고치려는 버그보다 나쁘다).
+async function writeRecord(payload, title, display, pending, release) {
   if (pending === undefined) pending = window.open("", "_blank");
   let tabUsed = false;
+  // true 면 release() 를 refreshAfterWrite() 가 끝난 뒤 부른다 — 아래
+  // finally 는 그 경우엔 다시 부르지 않는다(중복 호출 방지).
+  let deferred = false;
   try {
     const outcome = await tryWorker(payload, display);
     if (outcome.ok) {
@@ -2246,7 +2383,24 @@ async function writeRecord(payload, title, display, pending) {
       // 실패해도(예상 못 한 예외) 전역 unhandledrejection 경계 대신 여기서
       // 직접 reportFatal 로 받는다: writeRecord() 자신은 이미 반환된 뒤라
       // 그 경계가 잡아도 되지만, 어디서 왔는지 더 분명하게 여기서 잡는다.
-      refreshAfterWrite().catch(reportFatal);
+      //
+      // **결정(지시문이 명시적으로 요구한 트레이드오프)** — release() 는
+      // 이 폴링이 끝난 뒤로 미룬다. refreshAfterWrite() 가 반영을
+      // 확인하든(REFRESH_POLL_DELAYS_MS 안에 성공) 포기하든(34초 뒤
+      // "아직 반영 전입니다") 둘 다 "끝났다"로 보고 푼다 — 포기했을 때도
+      // 계속 잠가두면, 정말로 실패한(또는 34초보다 훨씬 더 늦게 반영될)
+      // 쓰기의 버튼이 이 세션이 끝날 때까지 영영 안 풀린다. 그 대신 받아
+      // 들이는 위험은: 반영이 34초보다 늦게 왔는데 그 사이 사용자가
+      // "안 됐나 보다"라며 다시 눌러 정말로 두 번째 쓰기가 나가는 경우다
+      // — 이 저장소 이슈 이력(#22~#26/#6~#7)은 전부 "몇 초 안에 두 번
+      // 클릭"이었지 "34초를 기다렸는데도 안 됐다고 믿고 다시 누른" 사례가
+      // 아니다. 실제로 반복 관측된 문제(즉시 재클릭)를 확실히 없애는 쪽을
+      // 택하고, 아직 관측된 적 없는 더 드문 위험(초장기 지연 뒤 재클릭)은
+      // "버튼이 평생 안 풀리는 것"보다 나은 쪽으로 남겨둔다.
+      deferred = true;
+      refreshAfterWrite()
+        .catch(reportFatal)
+        .finally(() => { if (release) release(); });
       return { ok: true };
     }
     if (outcome.reason === "not-configured" || outcome.reason === "network") {
@@ -2271,6 +2425,7 @@ async function writeRecord(payload, title, display, pending) {
     return { ok: false };
   } finally {
     if (pending && !tabUsed) pending.close();
+    if (!deferred && release) release();
   }
 }
 
@@ -2285,6 +2440,11 @@ async function writeRecord(payload, title, display, pending) {
 // 이유로 이전 코드가 이미 의존하던 성질).
 async function onSubmit(ev) {
   ev.preventDefault();
+  // 방어적 재확인(지시문 요구사항 4) — #submit-btn 은 lockForm() 이
+  // disabled 를 걸어 보통 여기 닿지 않지만, 텍스트 입력 하나뿐인 폼에서
+  // Enter 로 암묵 제출되는 경로 등은 disabled 버튼과 무관하게 submit
+  // 이벤트를 낼 수 있다.
+  if (FORM_BUSY) return;
   const text = document.getElementById("q").value;
   const code = resolveCode(text);
   if (!code) {
@@ -2333,7 +2493,8 @@ async function onSubmit(ev) {
     const payload = { op: "watch", code, name, price, date, days,
       source: document.getElementById("source").value,
       memo: document.getElementById("memo").value };
-    await writeRecord(payload, "WATCH " + name, name);
+    lockForm();
+    await writeRecord(payload, "WATCH " + name, name, undefined, releaseFormBusy);
     return;
   }
 
@@ -2345,7 +2506,8 @@ async function onSubmit(ev) {
         memo: document.getElementById("memo").value };
   const title = (open ? "SELL " : "BUY ") + name;
 
-  await writeRecord(payload, title, name);
+  lockForm();
+  await writeRecord(payload, title, name, undefined, releaseFormBusy);
 }
 
 document.getElementById("q").addEventListener("input", e => {

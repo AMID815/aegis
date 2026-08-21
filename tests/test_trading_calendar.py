@@ -124,3 +124,34 @@ def test_마지막_날짜에_등록해도_n이_0을_넘으면_None():
 
 def test_빈_달력에서는_None():
     assert cal.watch_deadline([], "2026-08-20", 3) is None
+
+
+# ── watch_date_unreachable: 결함6(2026-08-21 무동작 감사) — 비거래일 등록 감지 ──
+# watch_deadline() 의 None 이 "아직 마감일 아님"(정상, self-healing)과
+# "watch_date 자체가 거래일이 아님"(영구적)을 뭉개는 것을 이 함수가 가른다.
+
+
+def test_비거래일_등록은_감지된다():
+    """08-22(토)는 WATCH_DAYS 에 없고, 달력은 그 이후로도(08-24~26) 거래일을
+    담고 있다 — 앞으로도 절대 안 나타날 날짜라고 확신할 수 있다."""
+    assert "2026-08-22" not in WATCH_DAYS
+    assert cal.watch_date_unreachable(WATCH_DAYS, "2026-08-22") is True
+
+
+def test_거래일_등록은_불가능으로_판정되지_않는다():
+    assert cal.watch_date_unreachable(WATCH_DAYS, "2026-08-20") is False
+
+
+def test_달력의_마지막_날짜와_같으면_판단을_보류한다():
+    """이후로 며칠이나 지나왔는지 근거가 없는 경계 — 방어적으로 다룬다."""
+    assert cal.watch_date_unreachable(WATCH_DAYS, "2026-08-26") is False
+
+
+def test_달력보다_미래_날짜는_판단을_보류한다():
+    """아직 달력이 그 날짜까지 안 왔을 뿐일 수 있다 — 성급하게 단정하지 않는다."""
+    assert cal.watch_date_unreachable(WATCH_DAYS, "2026-08-27") is False
+    assert cal.watch_date_unreachable(WATCH_DAYS, "2026-12-31") is False
+
+
+def test_watch_date_unreachable_빈_달력에서는_판단_보류():
+    assert cal.watch_date_unreachable([], "2026-08-20") is False

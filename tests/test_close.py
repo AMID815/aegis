@@ -871,19 +871,29 @@ def test_종결_종목의_일봉은_안_받는다(monkeypatch):
     assert [c for c in 요청된 if c not in _지수_bars] == []
 
 
-# ── 결함2(2026-08-21 감사): 놓친 거래일을 캐치업한다 ──────────────────────
+# ── 캐치업: 놓친 거래일을 백필한다 ────────────────────────────────────────
 #
 # 예전엔 close.main() 이 latest(오늘) 하루만 autofill.run 에 넘겼다 — cron
 # 이 하루를 통째로 드롭하거나(모듈 독스트링) fetch_failed 로 하루를
 # 건너뛰면, 그날 체결은 영영 안 잡혔다. 이제는 todo(백필 대상 — 이미
 # missing_days 로 구한, 오름차순=오래된 순, WINDOW=30거래일로 유계인
 # 목록)를 재사용해 놓친 날짜도 각각 따로 넘긴다.
+#
+# **결함5(2026-08-21 무동작 감사) 반영: 재시도 창은 이제 분봉 재생 창
+# (autofill.MINUTE_WINDOW_DAYS+1 ≈ 8거래일)이다.** history/ 존재 여부와
+# 무관하게 이 폭만큼은 매 실행 다시 자동 체결 대상에 넣는다 — 아래 여러
+# 테스트의 `called` 기댓값이 이 폭을 반영해 바뀌었다(각 테스트에 이유를
+# 남겼다).
+
+_RETRY_WINDOW = close.cal.recent(ALL_DAYS, close.autofill.MINUTE_WINDOW_DAYS + 1)
+assert _RETRY_WINDOW == ALL_DAYS[-8:]   # 전제 확인 — 아래 테스트들의 계산 근거
 
 
 def test_자동체결은_missing_history_날짜를_전부_오래된_순으로_처리한다(monkeypatch):
     """실측 사고(2026-08-21): cron 이 하루를 드롭하면 그날 체결은 close.py
     가 latest 만 보는 한 영원히 안 잡혔다. todo(위에서 이미 계산해둔 백필
-    대상)를 재사용해 놓친 날짜 전부를 오래된 순으로 처리해야 한다."""
+    대상, 3일치)는 전부 분봉 재생 창(8거래일) 안에 들어오므로, 결과적으로
+    `called` 는 재시도 창 전체가 된다."""
     called = []
     기존_history = [f"{d}.json" for d in ALL_DAYS[-30:-3]]   # 마지막 3일 백필 대상
     _기본_준비(monkeypatch, 기존_history=기존_history, write_capture=[])
@@ -893,13 +903,17 @@ def test_자동체결은_missing_history_날짜를_전부_오래된_순으로_�
     rc = close.main()
 
     assert rc == 0
-    assert called == [ALL_DAYS[-3], ALL_DAYS[-2], ALL_DAYS[-1]], (
-        "오래된 순으로, 놓친 날 전부를 처리해야 한다")
+    assert called == _RETRY_WINDOW, "오래된 순으로, 재시도 창 전체를 처리해야 한다"
 
 
-def test_메울_날짜가_없으면_자동체결은_latest_하루만_처리한다(monkeypatch):
-    """정상적인(cron 이 안 밀린) 하루 — todo 가 비어도 latest 는 항상
-    처리해야 한다(기존 동작과 같다)."""
+def test_메울_날짜가_없어도_분봉_창_안의_날짜는_다시_처리된다(monkeypatch):
+    """결함5(2026-08-21 무동작 감사): history 가 전부 있어도(todo=[]),
+    분봉 창(≈8거래일) 안의 날짜는 매번 다시 자동 체결 대상에 들어가야
+    한다 — 그러지 않으면 캐치업 날짜에서 분봉 조회가 한 번 실패했을 때
+    (history/{day}.json 은 이미 쓰였으니) 다시는 재시도되지 않는다(실측
+    재현: test_결함5_캐치업_분봉_실패는_다음_실행에서_회복된다). 예전엔
+    이 상황에서 latest 하루만 처리했다 — 그 옛 동작 자체가 결함5의 원인
+    중 하나였다."""
     called = []
     _기본_준비(monkeypatch,
              기존_history=[f"{d}.json" for d in ALL_DAYS[-30:]],  # 백필 대상 없음
@@ -910,14 +924,13 @@ def test_메울_날짜가_없으면_자동체결은_latest_하루만_처리한�
     rc = close.main()
 
     assert rc == 0
-    assert called == [ALL_DAYS[-1]]
+    assert called == _RETRY_WINDOW
 
 
-def test_history_목록_실패해도_latest는_자동체결_대상에서_빠지지_않는다(monkeypatch):
-    """gh.list_dir 실패로 todo=[] 가 되더라도(위 리뷰 8번, F1) 오늘(latest)
-    의 자동 체결까지 같이 굶으면 안 된다 — 최소한 latest 는 항상 처리한다
-    (todo 가 비어있는 두 이유 — "정말 다 있음"과 "목록을 몰라서 모름" —
-    를 구분 못 하면 후자에서도 아무것도 안 처리하는 조용한 퇴행이 생긴다)."""
+def test_history_목록_실패해도_분봉_창_안의_날짜는_자동체결_대상에서_빠지지_않는다(monkeypatch):
+    """gh.list_dir 실패로 todo=[] 가 되더라도(위 리뷰 8번, F1) 분봉 재생
+    창 안의 날짜(latest 포함)까지 같이 굶으면 안 된다 — 재시도 창은 이제
+    history/ 목록과 완전히 무관하게 결정된다(결함5)."""
     called = []
     _기본_준비(monkeypatch, write_capture=[])
 
@@ -930,7 +943,7 @@ def test_history_목록_실패해도_latest는_자동체결_대상에서_빠지�
     rc = close.main()
 
     assert rc == 0
-    assert called == [ALL_DAYS[-1]]
+    assert called == _RETRY_WINDOW
 
 
 def test_특정_날짜의_자동체결_실패가_다른_날짜_처리를_막지_않는다(monkeypatch):
@@ -950,5 +963,100 @@ def test_특정_날짜의_자동체결_실패가_다른_날짜_처리를_막지_
     rc = close.main()
 
     assert rc == 1
-    assert called == [ALL_DAYS[-3], ALL_DAYS[-2], ALL_DAYS[-1]], (
-        "한 날짜가 실패해도 나머지 날짜는 계속 처리해야 한다")
+    assert called == _RETRY_WINDOW, "한 날짜가 실패해도 재시도 창 전체는 계속 처리해야 한다"
+
+
+# ── 결함5(2026-08-21 무동작 감사): 캐치업 날짜의 분봉 실패가 다음 실행에서 회복된다 ──
+#
+# 실측 재현: history/2026-08-20.json 이 없는(캐치업 대상) 상태에서
+# naver.fetch_minute 이 딱 그 날짜만 한 번 실패했다. 예전 코드는 history
+# 백필(fetch_minute 실패와 무관하게 먼저 실행됨)이 그 날짜를 missing_days
+# 에서 영구히 빼버려서, 다음 실행에서도 autofill 이 그 날짜를 다시는
+# 보지 않았다 — 2차 매수가 영영 사라졌다. 아래는 close.main() 을 두 번
+# 연달아 호출해 이 시나리오를 그대로 재현한다(positions.json/history 목록
+# 모두 두 호출 사이에 실제로 갱신되는 상태 저장형 대역을 쓴다).
+
+
+def test_결함5_캐치업_분봉_실패는_다음_실행에서_회복된다(monkeypatch, capsys):
+    """1회차: 캐치업 날짜(d)의 분봉 조회가 일시적으로 실패해 2차 매수(buy2)
+    를 놓친다. 2회차: history/d.json 은 이미 있지만(=missing_days 에 안
+    잡힘), d 가 아직 분봉 재생 창 안이라 다시 시도되고, 이번엔 성공해
+    buy2 가 회복돼야 한다. 이 fix 를 되돌리면(close.py 의 retry_window
+    를 빼면) 2회차에도 d 가 재시도 대상에서 빠져 buy2 가 영구히 사라진다
+    (Defect1 뮤테이션 증명)."""
+    d = ALL_DAYS[-2]
+    latest = ALL_DAYS[-1]
+    d_key = d.replace("-", "")
+
+    # "안전한" 기본 봉 — buy2(225,000)/buy3(210,000) 그 어느 쪽도 안 건드리고,
+    # 1차 또는 2차 체결 후의 익절선(각각 253,000/245,000 대) 도 못 건드린다.
+    안전_bar = {"open": 238000, "high": 240000, "low": 235000, "close": 239000, "volume": 100}
+    삼성 = {dd.replace("-", ""): dict(안전_bar) for dd in ALL_DAYS}
+    # d 의 저가만 buy2(225,000)를 건드리게 한다 — 고립된 단일 터치.
+    삼성[d_key] = {"open": 224000, "high": 226000, "low": 220000, "close": 222000, "volume": 100}
+
+    상태 = {"positions": {"schema": 1, "positions": [
+        {"id": "20260701-005930", "code": "005930", "name": "삼성전자",
+         "buys": [{"date": "2026-07-01", "price": 240000}],
+         "exits": [], "adjustments": [], "status": "open", "source": "수동",
+         "memo": "", "signal_date": None, "auto": True, "observed_at": None,
+         "orders": {"buy2": 225000, "buy3": 210000, "customized": False}},
+    ]}}
+    history_있음 = set(f"{dd}.json" for dd in ALL_DAYS[-30:-2])   # d·latest 둘 다 미백필
+
+    분봉_시도 = {"raised": False}
+
+    def 가짜_분봉(code, day):
+        assert day == d, f"터치가 없는 날짜인데 분봉을 요청했다: {day}"
+        if not 분봉_시도["raised"]:
+            분봉_시도["raised"] = True
+            raise RuntimeError("일시적 네트워크 실패")
+        return [{"t": f"{d_key}0931", "high": 226000, "low": 220000}]
+
+    def 가짜_읽기(path, *a, **k):
+        if path == close.POSITIONS:
+            return 상태["positions"], "psha"
+        if path == close.QUOTES:
+            return None, "qsha"
+        raise AssertionError(path)
+
+    def 가짜_쓰기(path, body, sha, msg):
+        if path == close.POSITIONS:
+            상태["positions"] = body
+        elif path.startswith("history/") and path.endswith(".json"):
+            history_있음.add(path[len("history/"):])
+
+    def 가짜_목록(path):
+        if path == "history":
+            return sorted(history_있음)
+        raise AssertionError(path)
+
+    def 가짜_bars(symbol, n=60):
+        if symbol == "005930":
+            return dict(삼성)
+        if symbol in _지수_bars:
+            return dict(_지수_bars[symbol])
+        raise AssertionError(symbol)
+
+    monkeypatch.setattr(close.gh, "read_json", 가짜_읽기)
+    monkeypatch.setattr(close.gh, "write_json", 가짜_쓰기)
+    monkeypatch.setattr(close.gh, "list_dir", 가짜_목록)
+    monkeypatch.setattr(close.naver, "fetch_trading_days", lambda n: list(ALL_DAYS))
+    monkeypatch.setattr(close.naver, "fetch_bars", 가짜_bars)
+    monkeypatch.setattr(close.naver, "fetch_minute", 가짜_분봉)
+
+    rc1 = close.main()
+    buys_1회차 = [b["price"] for b in 상태["positions"]["positions"][0]["buys"]]
+    assert buys_1회차 == [240000], (
+        f"1회차 시나리오 오류 — 분봉 실패가 났는데도 2차가 체결됐다: {buys_1회차}")
+    assert 분봉_시도["raised"] is True, "1회차에 분봉 실패가 실제로 발생해야 한다"
+    out1 = capsys.readouterr().out
+    assert "분봉 실패" in out1
+
+    rc2 = close.main()
+    buys_2회차 = [b["price"] for b in 상태["positions"]["positions"][0]["buys"]]
+
+    assert rc1 == 0 and rc2 == 0
+    assert buys_2회차 == [240000, 225000], (
+        "캐치업 날짜의 일시적 분봉 실패가 다음 실행에서 회복되지 않았다 — "
+        f"2차 매수가 영구히 사라졌다(결함5): {buys_2회차}")

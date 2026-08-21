@@ -187,8 +187,19 @@ def run(bars: dict, day: str, days_list: list) -> int:
     # 대기 주문(pending) 먼저 본다 — 오늘 체결되면 그 뒤 물타기·익절
     # 판정까지 같은 실행에서 이어져야 한다(같은 날 매수·매도가 나는
     # 경우를 다음 실행으로 미루면 그만큼 분봉 창을 까먹는다).
-    for p in [x for x in state["positions"]
-              if x["status"] == models.PENDING and x.get("auto", True)]:
+    #
+    # **결함8(2026-08-21 무동작 감사): `auto` 로 거르지 않는다.** 예전엔
+    # 이 리스트 컴프리헨션이 `x.get("auto", True)` 까지 걸러서, auto:false
+    # 인 pending 기록은 아래 만료 판정 자체에 도달하지 못했다 —
+    # `apply_auto` 의 계약(설계 §8, "자동매도뿐 아니라 자동매수(2차·3차)도
+    # 같이 멈춘다")은 **매매**를 말하는 것이지 **장부 정리**(만료 표시)를
+    # 말하는 게 아니다. 사용자가 "이 종목은 내 손으로 매매하겠다"고 누른
+    # 체크박스 하나 때문에 그 기록이 영원히 pending 으로 얼어붙어(화면엔
+    # "기한 지남"이 계속 찍히고) 만료(expired) 집계에서 영영 빠지면 안
+    # 된다 — 그 스크리너의 "이 신호는 결국 안 왔다"는 사실 자체는 auto
+    # 와 무관하게 참이다. 그래서 만료 판정은 auto 와 무관하게 항상 하고,
+    # `auto:false` 는 아래(가격 확인·체결) 단계에서만 건너뛴다.
+    for p in [x for x in state["positions"] if x["status"] == models.PENDING]:
         watch = p["watch"]
 
         # 기한부터 본다 — 가격을 보기 전에. 창을 넘긴 뒤 오늘 우연히
@@ -212,6 +223,35 @@ def run(bars: dict, day: str, days_list: list) -> int:
                 continue
             print(f"  관찰 기한 만료: {p['name']} (마감 {deadline} 지남)")
             state = out
+            continue
+        elif deadline is None and cal.watch_date_unreachable(days_list, watch["date"]):
+            # 결함6(2026-08-21 무동작 감사): watch.date 가 애초에 거래일이 아니면
+            # (주말·휴장일에 등록됨 — 페이지가 #date 기본값을 오늘로 채우지만
+            # 사용자가 다른 날짜로 고칠 수 있다) watch_deadline() 은 영원히
+            # None 이다. 그 None 은 "아직 마감일에 도달 못 함"(달력이 자라면
+            # 저절로 풀리는 정상 상태)과 겉모양이 완전히 같지만 뜻은 정반대다
+            # — 이 기록은 **절대** 마감일을 계산할 수 없다. 조용히 pending
+            # 으로 남기면 이 스크리너의 "원래 무효였던 신호"가 만료 집계에서
+            # 영영 빠지고, 그 사이 우연히 가격이 닿으면 소급 체결까지 될 수
+            # 있다(실측: 토요일 등록 → 다음 거래일 가격으로 체결). 즉시
+            # 만료 처리하되 통상 만료("기한 지남")와는 다른 로그를 남긴다 —
+            # 이건 기한을 넘긴 게 아니라 애초에 셀 수 없는 날짜였다.
+            try:
+                fresh, fresh_sha = gh.read_json(POSITIONS, default=models.empty_state())
+                out = models.apply_expire(models.normalize(fresh), p["id"], day)
+                gh.write_json(POSITIONS, out, fresh_sha,
+                              f"관찰 무효(비거래일 등록): {p['name']}")
+            except Exception as e:
+                print(f"[경고] 관찰 무효 처리 쓰기 실패 {p['id']}: {type(e).__name__}: {e}")
+                problems.append(p["id"])
+                continue
+            print(f"  관찰 무효 — 비거래일에 등록됨: {p['name']} (watch.date={watch['date']})")
+            state = out
+            continue
+
+        if not p.get("auto", True):
+            # 결함8: 매매(가격 확인·체결)만 건너뛴다 — 위 두 만료 분기는
+            # 이미 auto 와 무관하게 통과했다.
             continue
 
         # 등록일 당일은 아직 체결 대상이 아니다(결함1, 2026-08-21 감사).
@@ -291,8 +331,31 @@ def run(bars: dict, day: str, days_list: list) -> int:
             except Exception as e:
                 # 창 안인데도 실패했다 — 네트워크 문제일 가능성이 크다.
                 # 한 종목의 실패가 나머지 종목의 체결까지 막으면 안 된다.
-                # 읽기 실패라 종료코드는 더럽히지 않는다 — 다음 실행이
-                # 다시 잡는다(아직 창 안이라 복구될 여지가 있다).
+                # 읽기 실패라 종료코드는 더럽히지 않는다.
+                #
+                # **결함5(2026-08-21 무동작 감사)의 정정.** 이 자리의 옛
+                # 주석은 "다음 실행이 다시 잡는다"고 적어뒀지만, 그건 `day`
+                # 가 `latest`(오늘)일 때만 참이었다 — close.main() 이
+                # 예전엔 `sorted(set(todo) | {latest})` 로만 이 함수를
+                # 불러서, 캐치업 날짜(latest 가 아닌 날)는 그
+                # history/{day}.json 이 (이 실패와 무관하게, 다른 루프에서
+                # 먼저) 한 번 쓰이는 순간 missing_days 에서 영구히 빠졌다 —
+                # 그러면 이 날짜는 다시는 autofill.run 에 안 넘어와서, 이
+                # 실패로 놓친 체결이(예: 2차 매수) 영영 복구되지 않았다
+                # (실측 재현: tests/test_close.py 의 결함5 재현 테스트).
+                # 손절선은 3차 체결 후에만 켜지므로, 놓친 2차·3차는 그
+                # 포지션을 익절로만 닫힐 수 있게 만든다 — 승률이 조용히
+                # 부풀려진다.
+                #
+                # 지금은 close.main() 이 분봉 창(MINUTE_WINDOW_DAYS≈7거래일)
+                # 안의 모든 거래일을 history 존재 여부와 무관하게 매 실행
+                # 다시 이 함수에 넘긴다(close.py 참조) — 그래서 이 주석의
+                # "다음 실행이 다시 잡는다"는 이제 **모든** 날짜에 대해
+                # 참이다(창을 넘긴 날짜는 애초에 이 분기에 안 온다 — 아래
+                # else 의 일봉 대체 경로로 간다). 이미 끝난 날짜를 다시
+                # 넘겨도 since_for()/replay 의 since 가드가 중복 체결을
+                # 막으므로(모듈 독스트링) 이 재시도는 안전하고 거의 공짜다
+                # (터치된 종목만 분봉을 다시 요청한다).
                 print(f"[경고] 분봉 실패 {p['code']} {day}: {type(e).__name__}: {e} — 건너뛴다")
                 continue
 

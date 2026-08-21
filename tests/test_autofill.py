@@ -682,3 +682,122 @@ def test_일봉_저가가_목표가에_닿았는데_분봉에서_확인_안되�
     assert fake.writes == []
     out = capsys.readouterr().out
     assert "불일치" in out
+
+
+# ── 결함7(2026-08-21 무동작 감사): mutation 에도 살아남는 가드를 못박는다 ──
+#
+# 아래 세 테스트는 지금 통과하는 코드를 하나도 안 고친다 — 각 분기/조건을
+# 지워도(뮤테이션) 전체 588개 테스트가 그대로 통과하는 사각지대였다. 여기서
+# 그 분기가 없으면 실패하는 테스트를 추가해 못박는다.
+
+
+def test_2차까지_체결된_뒤_3차가에_닿으면_거름망을_통과한다():
+    """touched() 의 `len(filled)==2 → buy3` 분기 — 정확히 2건 체결된
+    상황을 다루는 유일한 분기라, 지워도 다른 분기가 우연히 못 잡는다.
+    놓치면 3차가 영원히 안 걸리고, 손절선은 3차 체결 후에만 켜지므로
+    이 포지션은 이후 익절로만 닫힐 수 있다(승률 부풀림). 기존 touched()
+    테스트 4개 중 이 상황(len(filled)==2)을 쓰는 건 하나도 없었다."""
+    assert autofill.touched({"high": 96000, "low": 87500},
+                            {"buy2": 94000, "buy3": 88000},
+                            [100000, 94000]) is True
+
+
+def test_저가가_목표가와_정확히_같아도_대기_체결이_닿은_것으로_본다(monkeypatch):
+    """`bar["low"] > watch["price"]`(엄격한 부등식)가 핵심이다 — `>=` 로
+    바뀌면 저가가 목표가에 정확히 같은 날(사용자가 고르는 목표가는 흔히
+    라운드 넘버라 저가가 정확히 그 값을 찍는 일이 드물지 않다)을 "안
+    닿음"으로 오판해 대기 체결이 영원히 안 걸린다."""
+    fake = FakeGH({"schema": 1, "positions": [_pending()]})   # watch.price=240000
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute", lambda code, day: [
+        {"t": "202608210931", "high": 241000, "low": 240000}])
+    rc = autofill.run({"005930": {"20260821": {"high": 245000, "low": 240000}}},
+                      "2026-08-21", CAL)
+    assert rc == 0
+    p = fake.state["positions"][0]
+    assert p["status"] == "open", "저가==목표가인데 체결되지 않았다"
+    assert p["buys"][0]["price"] == 240000
+
+
+# ── 결함6(2026-08-21 무동작 감사): 비거래일에 등록된 watch 는 무한 대기하지 않는다 ──
+#
+# watch_deadline() 이 돌려주는 None 은 "아직 기한 아님"(정상)과 "watch.date
+# 자체가 거래일이 아님"(영구적, 페이지 #date 기본값이 오늘이지만 사용자가
+# 주말/휴장일로 고칠 수 있다)을 구분 못 했다. 후자를 놓치면 그 기록은
+# 영원히 pending 으로 남아 만료 집계에서 빠지고, 그 사이 우연히 가격이
+# 닿으면 소급 체결까지 될 수 있다.
+
+
+def test_비거래일에_등록된_대기는_무효로_즉시_만료된다(monkeypatch, capsys):
+    """실측 재현: 2026-08-08(토)에 등록된 관찰 — CAL 은 이 날짜를 모르고,
+    그 이후로도 여러 거래일(08-20~26)을 담고 있다. 그러면 watch_deadline()
+    은 영원히 None 이지만, 이 기록은 만료로 처리돼야 한다 — 가격 확인보다
+    먼저(우연한 소급 체결을 막는다)."""
+    p = _pending(watch={"price": 240000, "date": "2026-08-08", "days": 5})
+    fake = FakeGH({"schema": 1, "positions": [p]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    calls = []
+    monkeypatch.setattr(autofill.naver, "fetch_minute",
+                        lambda code, day: calls.append(code) or [])
+    rc = autofill.run({"005930": {"20260821": {"high": 250000, "low": 235000}}},
+                      "2026-08-21", CAL)
+    assert rc == 0
+    assert calls == [], "무효 처리는 가격 확인보다 먼저 결정돼야 한다"
+    assert len(fake.writes) == 1
+    pos = fake.state["positions"][0]
+    assert pos["status"] == "expired"
+    out = capsys.readouterr().out
+    assert "비거래일" in out
+
+
+def test_거래일에_등록된_대기는_무효_처리되지_않는다(monkeypatch):
+    """위 테스트의 짝 — 정상 등록(거래일)은 절대 이 경로를 타면 안 된다."""
+    fake = FakeGH({"schema": 1, "positions": [_pending()]})   # watch.date=2026-08-20(CAL 안)
+    monkeypatch.setattr(autofill, "gh", fake)
+    rc = autofill.run({"005930": {"20260821": {"high": 250000, "low": 245000}}},
+                      "2026-08-21", CAL)   # 아직 마감(08-25) 전, 안 닿음
+    assert rc == 0
+    assert fake.writes == []
+    assert fake.state["positions"][0]["status"] == "pending"
+
+
+# ── 결함8(2026-08-21 무동작 감사): auto:false 인 대기도 기한이 지나면 만료된다 ──
+#
+# apply_auto 의 계약(설계 §8)은 매매(자동매수·자동매도)를 멈추는 것이지
+# 만료(장부 정리)를 멈추는 게 아니다. 예전엔 pending 루프 자체가
+# auto:false 기록을 걸러서, 그런 기록은 기한이 지나도 절대 만료되지
+# 않았다 — 화면엔 "기한 지남"이 계속 찍히고 통계의 만료 집계에선 빠졌다.
+
+
+def test_예외_지정된_pending도_기한이_지나면_만료된다(monkeypatch, capsys):
+    """auto:false 는 자동 매수를 막을 뿐 만료 판정까지 막으면 안 된다."""
+    fake = FakeGH({"schema": 1, "positions": [_pending(auto=False)]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    calls = []
+    monkeypatch.setattr(autofill.naver, "fetch_minute",
+                        lambda code, day: calls.append(code) or [])
+    rc = autofill.run({"005930": {"20260826": {"high": 250000, "low": 245000}}},
+                      "2026-08-26", CAL)   # 마감(08-25) 하루 지남
+    assert rc == 0
+    assert calls == [], "만료는 auto:false 여도 가격 확인 없이 결정돼야 한다"
+    assert len(fake.writes) == 1
+    p = fake.state["positions"][0]
+    assert p["status"] == "expired"
+    assert p["watch"]["expired_on"] == "2026-08-26"
+    out = capsys.readouterr().out
+    assert "관찰 기한 만료" in out
+
+
+def test_예외_지정된_pending은_기한_전에는_여전히_체결되지_않는다(monkeypatch):
+    """위 테스트의 짝 — auto:false 는 여전히 매매(체결)를 막아야 한다
+    (기존 test_예외_지정된_pending_은_체결되지_않는다 와 같은 계약,
+    회귀 방지로 한 번 더 확인한다)."""
+    fake = FakeGH({"schema": 1, "positions": [_pending(auto=False)]})
+    monkeypatch.setattr(autofill, "gh", fake)
+    monkeypatch.setattr(autofill.naver, "fetch_minute", lambda code, day: [
+        {"t": "202608210931", "high": 241000, "low": 239000}])
+    rc = autofill.run({"005930": {"20260821": {"high": 245000, "low": 239000}}},
+                      "2026-08-21", CAL)   # 마감 전, 안 만료
+    assert rc == 0
+    assert fake.writes == []
+    assert fake.state["positions"][0]["status"] == "pending"

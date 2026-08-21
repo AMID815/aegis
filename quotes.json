@@ -1,5 +1,5 @@
 {
- "as_of_kst": "2026-08-21T16:13:55+09:00",
+ "as_of_kst": "2026-08-21T17:32:12+09:00",
  "benchmark": {
   "KOSDAQ": 801.94,
   "KOSPI": 6912.95
@@ -512,11 +512,18 @@
   }
  },
  "fail_count": 0,
- "is_final": false,
+ "is_final": true,
  "missing": [],
- "ok_count": 0,
+ "ok_count": 1,
  "positions_dropped": 0,
- "quotes": {},
+ "quotes": {
+  "001210": {
+   "market": "",
+   "name": "금호전기",
+   "price": 8380,
+   "status": "tradable"
+  }
+ },
  "trading_days": [
   "2025-08-12",
   "2025-08-13",

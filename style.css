@@ -22,17 +22,37 @@ th:first-child, td:first-child { text-align:left; }
    table-cell 참여 여부가 갈릴 수 있는 지점이라(실측: 열 정렬은 유지됐지만
    신뢰하고 싶지 않다), 안에 별도 div 를 하나 더 두고 그 div 에서만
    flex 로 이름과 버튼을 나열한다. */
-.name-cell { display:flex; align-items:center; gap:6px; justify-content:space-between; }
+.name-cell { display:flex; align-items:center; gap:6px; }
+/* 버튼 그룹(app.js nameCell() 의 .name-actions) 을 이름과 분리된 자식
+   flex 컨테이너로 둔다 — FIX: 표 안의 버튼 정렬(2026-08-21 실사고).
+   예전엔 .name-cell 전체에 justify-content:space-between 을 줘서 이름
+   span 과 버튼들을 한 줄에 나눠 배치했는데, 행마다 버튼 개수가 다르다
+   (열린 정상 행 3개: 고치기+토글+삭제 / 닫힌 정상 행 2개: 고치기+삭제 /
+   대기 행 2개: 토글+삭제 / bad·만료 행 1개: 삭제뿐) — space-between 은
+   그 개수에 따라 버튼마다 다른 가로 위치에 떨어뜨려 세로줄을 못
+   이뤘다. margin-left:auto 로 이 그룹 하나만 오른쪽 끝에 붙이면, 버튼
+   개수와 무관하게 그룹의 오른쪽 끝(=항상 마지막인 삭제 버튼)이 행마다
+   같은 자리에 온다 — 아래 버튼 min-width 와 합쳐 나머지 버튼들도
+   오른쪽에서부터 같은 폭으로 줄을 맞춘다. */
+.name-actions { display:flex; gap:6px; margin-left:auto; }
 /* width:auto 가 꼭 필요하다 — 아래 600px 이하 미디어쿼리가 `button` 을
    전부 100% 폭으로 늘리는데, 그 규칙은 원래 폼 하단의 제출/취소 버튼을
    겨눈 것이다. 이 선택자로 막지 않으면 표 셀 안의 버튼도 같이 늘어나
    버튼 폭이 249px 까지 부풀고 다음 열(매입가) 위로 겹쳐 그린다(375px
    실측으로 발견 — getBoundingClientRect 로 확인, 화면으로는 안 보일
-   수도 있는 종류의 결함이라 반드시 실측해야 했다). */
+   수도 있는 종류의 결함이라 반드시 실측해야 했다). min-width 는 이
+   width:auto 와 충돌하지 않는다(서로 다른 속성) — width:auto 는 여전히
+   위 100% 강제를 막고, min-width 는 세 버튼(고치기·수동 전환/자동
+   전환·삭제)의 폭을 가장 긴 라벨("수동 전환"/"자동 전환") 기준으로
+   맞춰 세로 정렬을 만든다(375px·데스크톱 실측: 버튼 3종 모두
+   getBoundingClientRect().width 68px 로 동일 — 표 안 버튼 정렬 검증
+   참조). */
 /* .auto-toggle-btn(자동/수동 토글)·.delete-btn(삭제)도 같은 표 셀 안에
    .amend-btn 과 나란히 앉는다 — 위 주석과 같은 폭 사고를 반복하지 않도록
    같은 규칙을 공유한다. */
-.amend-btn, .auto-toggle-btn, .delete-btn { font-size:.75rem; padding:2px 6px; flex-shrink:0; width:auto; }
+.amend-btn, .auto-toggle-btn, .delete-btn {
+  font-size:.75rem; padding:2px 6px; flex-shrink:0; width:auto; min-width:68px;
+}
 /* 자동 예외([수동]) 표시 — .asof/.field label 이 이미 쓰는 "옅은 보조 텍스트"
    톤을 그대로 따른다. 새 시각 언어를 더하지 않는다. */
 .manual-mark { color:var(--dim); font-size:.75rem; }
@@ -63,6 +83,11 @@ button { cursor:pointer; }
 .result.fallback { background:var(--dim); color:#fff; }
 .result.blocked { background:var(--up); color:#fff; }
 .result a { color:#fff; }
+/* 저장 성공 뒤 자동 재조회 진행 상황(app.js renderRefreshStatus(), 항목
+   20) — 성공 문구(.result p) 아래 조용히 붙는 한 줄이다. 새 배지 색을
+   더하지 않고 흰 글씨를 그대로 쓰되, opacity 로 본문보다 눈에 덜 띄게
+   낮춘다 — "확인창을 막지 않는 조용한 안내" 라는 지시문 요구 그대로. */
+.result .refresh-status { opacity:.8; font-size:.8rem; }
 @media (max-width:600px) { .field, input, select, button { width:100%; } }
 
 /* 통과 커튼(#gate, index.html/app.js 주석 참조) — 잠금이 아니라 커튼이다.

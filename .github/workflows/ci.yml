@@ -1,0 +1,64 @@
+name: ci
+# 테스트 스위트(pytest)를 push·PR 마다 강제로 돌린다.
+#
+# **이 워크플로가 왜 있나** (2026-08-21 감사): 테스트가 수백 개 있는데
+# 이걸 실행하는 CI 도, pre-commit 훅도 없었다 — 스위트의 모든 가드는
+# "푸시 전에 사람이 pytest 를 손으로 타이핑해서 돌렸을 것"에만 기대고
+# 있었다. main 은 그대로 GitHub Pages(amid815.github.io/aegis)에 서빙되고
+# Actions(close/intake/quotes.yml)가 그대로 배포한다 — 즉 스위트가
+# 빨간불이라는 건 곧 **실제 서비스가 깨졌다**는 뜻인데, 그걸 병합 전에
+# 미리 잡는 장치가 하나도 없었다. 이 워크플로는 그 마지막 인간 확인
+# 단계를 자동화한다.
+#
+# 이 워크플로는 데이터를 커밋하지 않는다(close/intake/quotes.yml 과
+# 다르다) — 그래서 `contents: write` 가 필요 없고 `contents: read` 로 충분
+# 하다. `data-write` concurrency 그룹(quotes.yml/close.yml 공유, intake.yml
+# 은 별도의 `intake` 그룹)에도 넣지 않는다 — 그 그룹들이 있는 이유는
+# "같은 파일(quotes.json/positions.json)에 순차로 커밋해야 하고, 취소하면
+# 그 커밋이 통째로 사라진다"이다(cancel-in-progress: false). 이 워크플로는
+# 아무 파일도 안 쓰므로 그 직렬화가 필요 없다. 대신 워크플로·브랜치별로
+# 그룹을 잡아 같은 브랜치에 연달아 푸시했을 때 오래된 실행을 취소한다 —
+# 커밋을 안 하니 취소해도 잃을 게 없다(위 데이터 워크플로들과 정반대 이유로
+# cancel-in-progress: true).
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # requirements 파일이 없다 — 스위트는 표준 라이브러리 + pytest 뿐이라
+      # pytest 만 직접 설치한다.
+      - name: pytest 설치
+        run: python -m pip install pytest
+
+      - name: 테스트 스위트
+        run: python -m pytest
+
+      # app.js 는 자체 테스트 하네스가 없다 — tests/test_js_orders_sync.py 가
+      # node vm 으로 개별 함수 몇 개만 실행해볼 뿐, 파일 전체의 문법은
+      # 아무것도 보장하지 않는다. 문법 오류 하나가 그 실행 경로 밖에
+      # 있으면 pytest 로는 못 잡고, 그대로 GitHub Pages 라이브 페이지를
+      # 조용히 깨뜨린다(콘솔 오류 말고는 표시가 없다).
+      #
+      # ubuntu-latest 러너 이미지에 node 가 기본 설치돼 있음을 확인했다
+      # (actions/runner-images Ubuntu 24.04 이미지 문서, Node.js 22.23.2
+      # 사전 설치 — 2026-08-21 확인) — actions/setup-node 없이 바로 쓴다.
+      - name: app.js 문법 검사
+        run: node --check app.js

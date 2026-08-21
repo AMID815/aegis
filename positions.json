@@ -23,6 +23,30 @@
    "signal_date": null,
    "source": "상단눌림",
    "status": "open"
+  },
+  {
+   "adjustments": [],
+   "auto": true,
+   "buys": [
+    {
+     "date": "2026-08-21",
+     "price": 2000000
+    }
+   ],
+   "code": "000660",
+   "exits": [],
+   "id": "20260821-000660",
+   "memo": "",
+   "name": "SK하이닉스",
+   "observed_at": null,
+   "orders": {
+    "buy2": 1880000,
+    "buy3": 1760000,
+    "customized": false
+   },
+   "signal_date": null,
+   "source": "수동",
+   "status": "open"
   }
  ],
  "schema": 1

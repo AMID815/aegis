@@ -241,6 +241,109 @@ const avgBuy = p => p.buys.reduce((s, b) => s + b.price, 0) / p.buys.length;
 const exitPrice = p => (p.exits.length ? p.exits[p.exits.length - 1].price : null);
 const pct = (from, to) => ((to - from) / from) * 100;
 
+// ── 가상 지정가 주문 — 익절선·손절선 재계산 (scripts/orders.py 판박이) ──
+//
+// 익절선·손절선은 positions.json 에 저장되지 않는다 — 저장된 건 체결된
+// 매수가(buys)와 사다리(orders.buy2/buy3)뿐이고, 목표가는 그때그때
+// orders.py 의 average/take_profit/stop_loss 로 계산한다(설계 §2). 상세행
+// (renderOpenDetail 등, 아래)에 그 값을 보여주려면 같은 계산을 여기서 한
+// 번 더 해야 하는데 — **두 구현이 갈리면 화면이 절대 그 가격에 체결되지
+// 않을 숫자를 자신 있게 보여주는 사고가 난다.** 그래서 이 절은 orders.py
+// 를 줄 단위로 그대로 옮긴다. 비율·호가단위 표 숫자 자체의 근거(실측+
+// 한화 표 대조)는 그쪽 주석에 있다 — 여기서 되풀이하지 않는다. 상수가
+// 어긋나면 tests/test_js_orders_sync.py 가 못박는다(정규식으로 이 파일의
+// 상수를 뽑아 orders.py 실제 값과 대조).
+//
+// 1차 매수가 대비 비율 / 평균가 대비 비율 — orders.py 의 BUY2_RATIO/
+// BUY3_RATIO/TAKE_PROFIT_RATIO/STOP_LOSS_RATIO 판박이. ORD_ 접두어를 붙인
+// 이유: 이 이름 자체가 "orders.py 와 짝지어 검증되는 상수"라는 걸 코드로
+// 드러내고, 동기화 테스트의 정규식이 엉뚱한 동명의 상수를 못 집게 한다.
+const ORD_BUY2_RATIO = 0.94;          // -6%
+const ORD_BUY3_RATIO = 0.88;          // -12%
+const ORD_TAKE_PROFIT_RATIO = 1.053;  // +5.3%
+const ORD_STOP_LOSS_RATIO = 0.91;     // -9%, 3차 체결 후에만 발동
+
+// KRX 호가단위 — orders.py _TICKS/_TICK_TOP 판박이.
+const ORD_TICKS = [[2000, 1], [5000, 5], [20000, 10], [50000, 50], [200000, 100], [500000, 500]];
+const ORD_TICK_TOP = 1000;   // 500,000원 이상
+
+function ordTickSize(price) {
+  for (const [upper, t] of ORD_TICKS) {
+    if (price < upper) return t;
+  }
+  return ORD_TICK_TOP;
+}
+
+// 매수 지정가 — 목표가보다 더 내지 않도록 내린다. orders.py floor_tick 판박이.
+function ordFloorTick(price) {
+  const t = ordTickSize(price);
+  return Math.floor(price / t) * t;
+}
+
+// 매도 지정가 — 목표가보다 덜 받지 않도록 올린다. orders.py ceil_tick 판박이
+// — 파이썬은 정수 나눗셈만으로 올림을 표현하는 요령(-((-price)//t)*t)을
+// 쓴다. JS 에는 정수 나눗셈 연산자가 없어 Math.floor 로 그 나눗셈을
+// 대신하지만, 부호를 뒤집어 내림한 뒤 다시 뒤집는 같은 산식을 그대로
+// 따른다 — Math.ceil 을 바로 쓰지 않는 이유는 두 파일을 나란히 읽을 때
+// 같은 연산 순서이길 바라서다(값 자체는 이 구간에서 Math.ceil(price/t)*t
+// 와도 같다 — price/t 가 정수 범위 안이라 부동소수점 오차가 끼어들 자리가
+// 없다).
+function ordCeilTick(price) {
+  const t = ordTickSize(price);
+  return -Math.floor(-price / t) * t;
+}
+
+// 파이썬 round() 는 반올림(half-up)이 아니라 "가장 가까운 짝수로"
+// (banker's rounding, half-to-even)다 — round(0.5)==0, round(2.5)==2 인데
+// JS 의 Math.round() 는 항상 위로 반올림해 Math.round(0.5)==1,
+// Math.round(2.5)==3. 이 프로젝트가 실측한 247500×1.053=260617.4999999997
+// 처럼, 한국 호가단위(전부 5의 배수)를 곱하는 계산은 정확히 x.5 로
+// 떨어지는 경우가 드물지 않다(orders.py 테스트: 1650×0.91=1501.5,
+// 1500×1.053=1579.5 — 둘 다 우연히 올림 결과가 짝수라 Math.round 와
+// 결과가 같지만, 밑 정수가 짝수인 경우(예: 500×1.053=526.5 → 파이썬은
+// 526, Math.round 는 527)는 실제로 갈린다 — tests/test_js_orders_sync.py
+// 옆 보고서의 교차검증표 참조. 이 함수 없이 Math.round 를 그대로 쓰면
+// 화면이 실제로 체결되지 않을 익절선/손절선을 보여줄 수 있다.
+function pyRound(x) {
+  const floor = Math.floor(x);
+  const diff = x - floor;
+  if (diff < 0.5) return floor;
+  if (diff > 0.5) return floor + 1;
+  return (floor % 2 === 0) ? floor : floor + 1;   // 정확히 .5 — 가장 가까운 짝수로
+}
+
+// 체결된 매수가들의 평균. orders.py average 판박이(설계 §3: 동일 수량
+// 가정 = 산술평균).
+function ordAverage(prices) {
+  if (!prices.length) throw new Error("체결된 매수가 없다");
+  return pyRound(prices.reduce((s, v) => s + v, 0) / prices.length);
+}
+
+// 1차 매수가로부터 2차·3차 지정가를 산출한다. orders.py plan 판박이 —
+// 실제로는 apply_buy/apply_watch_fill 이 관측 시점에 이 계산을 한 번만
+// 하고 positions.json 의 orders 에 절대가격으로 저장하므로, 상세행은
+// 저장된 값(p.orders.buy2/buy3)을 그대로 쓰지 이 함수를 다시 부르지
+// 않는다 — 그래도 두 파일이 정말 같은 산식인지 교차검증하려면 JS 쪽에도
+// 이 함수가 있어야 해서 그대로 옮겨 둔다(검증 방법은 이 작업의 보고서 참조).
+function ordPlan(firstPrice) {
+  return {
+    buy2: ordFloorTick(pyRound(firstPrice * ORD_BUY2_RATIO)),
+    buy3: ordFloorTick(pyRound(firstPrice * ORD_BUY3_RATIO)),
+  };
+}
+
+// 익절선. orders.py take_profit 판박이 — 평균가 기준이라 물타기하면
+// 내려온다. ceil_tick 으로 올린다(매도라서 목표가보다 덜 받지 않는 쪽).
+function ordTakeProfit(prices) {
+  return ordCeilTick(pyRound(ordAverage(prices) * ORD_TAKE_PROFIT_RATIO));
+}
+
+// 손절선. orders.py stop_loss 판박이 — 3차 체결 전에는 None(설계 §2).
+function ordStopLoss(prices) {
+  if (prices.length < 3) return null;
+  return ordCeilTick(pyRound(ordAverage(prices) * ORD_STOP_LOSS_RATIO));
+}
+
 // 액면분할 보정: 매입가는 조정되지 않는데 네이버 시세는 조정된다.
 // 보정하지 않으면 5:1 분할 다음날부터 -80% 로 보인다.
 //
@@ -459,9 +562,27 @@ function nameCell(tr, r, mark) {
   const td = document.createElement("td");
   const wrap = document.createElement("div");
   wrap.className = "name-cell";
-  const span = document.createElement("span");
-  span.textContent = (r.p.name || r.p.code || "?") + mark;
-  wrap.appendChild(span);
+
+  // 이름 자체를 상세행 토글로 쓴다(신규: 지정가·체결가 상세). 진짜
+  // <button> 이라 Enter/Space 가 브라우저 기본 동작으로 클릭을 내므로
+  // 별도 키보드 리스너가 필요 없다. isExpandable(아래)이 "토글을
+  // 달지"와 renderTable 의 "상세행을 실제로 그릴지"를 같은 기준으로
+  // 판단한다 — bad(가격을 못 읽는 손상 기록)는 펼쳐도 보여줄 지정가·
+  // 체결가 자체가 없어 뺀다(고치기/자동토글 버튼도 같은 이유로 이미
+  // r.bad 를 게이트로 쓴다, 아래 actions 블록 참조).
+  let nameEl;
+  if (isExpandable(r)) {
+    nameEl = document.createElement("button");
+    nameEl.type = "button";
+    nameEl.className = "name-toggle";
+    nameEl.dataset.id = r.p.id;
+    nameEl.setAttribute("aria-expanded", EXPANDED_IDS.has(r.p.id) ? "true" : "false");
+    nameEl.setAttribute("aria-controls", "detail-" + r.p.id);
+  } else {
+    nameEl = document.createElement("span");
+  }
+  nameEl.textContent = (r.p.name || r.p.code || "?") + mark;
+  wrap.appendChild(nameEl);
 
   // 버튼들을 이름과 분리된 자식 flex 컨테이너에 몰아넣는다(style.css
   // .name-actions 옆 주석 — FIX: 표 안의 버튼 정렬). 행마다 버튼 개수가
@@ -551,9 +672,14 @@ const fmt = n => n === null || n === undefined ? "-" : Math.round(n).toLocaleStr
 const fmtPct = n => n === null ? "-" : (n > 0 ? "+" : "") + n.toFixed(2) + "%";
 const cls = n => n === null ? "" : (n > 0 ? "up" : n < 0 ? "down" : "");
 
-function renderTable(id, list) {
+function renderTable(id, list, quotes) {
   const tb = document.querySelector("#" + id + " tbody");
   tb.textContent = "";
+  // 상세행의 colspan — 하드코딩하지 않고 실제 헤더 개수를 센다(제약 4).
+  // #open 과 #closed 의 헤더 문구는 다르지만(매입가/현재가 대 매입가/
+  // 매도가) 개수는 지금 둘 다 6이다 — 그래도 하드코딩하면 다음에 한
+  // 표에만 열을 추가했을 때 조용히 어긋난다.
+  const colCount = document.querySelectorAll("#" + id + " thead th").length;
   for (const r of list) {
     const tr = document.createElement("tr");
     // 독립된 문제들이라 동시에 나올 수 있다(예: 상태 불일치이면서 동시에
@@ -600,7 +726,280 @@ function renderTable(id, list) {
     cell(tr, heldCell);
     cell(tr, r.p.source || "(출처 없음)");   // positions.json 은 normalize() 를 안 거친다 — 필드 누락 가능
     tb.appendChild(tr);
+
+    // 상세행 — EXPANDED_IDS(모듈 전역, 제약 1)에 있으면 이 재렌더에서도
+    // 다시 그린다. isExpandable 을 nameCell 과 공유해 "토글이 있는 행"과
+    // "상세행이 실제로 그려지는 행"이 어긋나지 않게 한다.
+    if (isExpandable(r) && EXPANDED_IDS.has(r.p.id)) {
+      tb.appendChild(buildDetailRow(r, colCount, quotes));
+    }
   }
+}
+
+// ── 행 상세(신규) — 지정가와 체결가를 구분해 보여준다 ───────────────────
+//
+// 지금까지 표는 평균 체결가 하나만 보여줘서 "지금 얼마에 걸려 있는지"·
+// "언제 체결됐는지"·"익절선/손절선이 어디인지"가 전부 안 보였다(지시문).
+// orders/buys/exits/watch 는 이미 positions.json 에 다 있다 — 이 절은
+// 그걸 펼침 행 하나로 드러낼 뿐, 새 데이터를 만들지 않는다.
+
+// 상세행을 펼칠 수 있는 행인가 — nameCell(토글 버튼을 달지)과 renderTable
+// (상세행을 실제로 그릴지)이 이 기준을 공유해야 어긋나지 않는다. bad(가격을
+// 안전하게 못 읽는 손상 기록)는 뺀다 — 지정가·체결가 자체를 신뢰할 수
+// 없는 기록을 펼쳐봤자 보여줄 게 없다(고치기/자동토글 버튼도 같은 이유로
+// 이미 r.bad 를 게이트로 쓴다, nameCell 참조).
+function isExpandable(r) {
+  return !r.bad && typeof r.p.id === "string" && !!r.p.id;
+}
+
+// 체결 날짜·시각을 한 줄로 합친다. t(분 단위 체결 시각, "YYYYMMDDHHMM")는
+// 자동 체결(2차·3차·익절·손절, 그리고 지정가 관찰이 체결된 1차)에만 있다
+// — 손으로 "지금 관측"을 입력한 1차는 날짜만 있고 시각이 없다(apply_buy
+// 는 t 를 안 남긴다). 시각이 없으면 날짜만 보여준다.
+function fmtFillMoment(date, t) {
+  if (!date) return "-";
+  if (typeof t === "string" && t.length >= 12) {
+    return date + " " + t.slice(8, 10) + ":" + t.slice(10, 12);
+  }
+  return date;
+}
+
+// 1차/2차/3차 각각의 지정가(orders 에 저장된 값)와 체결가(buys 의 실제
+// 체결)를 뽑는다. 1차는 별도 지정가 개념이 없다 — 관측한 그 가격이 곧
+// 주문가이자 체결가라, limitPrice 와 filledPrice 가 항상 같다. 2차·3차는
+// p.orders.buy2/buy3(지정가)와 p.buys[1]/[2](체결됐으면 그 기록)를
+// 나눠서 본다 — 이 둘을 구분하는 게 이 기능 전체의 존재 이유다.
+function orderRungs(p) {
+  const buys = p.buys || [];
+  const orders = p.orders || {};
+  const mk = (label, idx, limitPrice) => {
+    const b = buys[idx];
+    return {
+      label, limitPrice,
+      filled: !!b,
+      filledPrice: b ? b.price : null,
+      filledDate: b ? b.date : null,
+      filledTime: b ? (typeof b.t === "string" ? b.t : null) : null,
+    };
+  };
+  return [
+    mk("1차", 0, buys[0] ? buys[0].price : null),
+    mk("2차", 1, typeof orders.buy2 === "number" ? orders.buy2 : null),
+    mk("3차", 2, typeof orders.buy3 === "number" ? orders.buy3 : null),
+  ];
+}
+
+// 상세 안에 쓰는 "값 + 라벨" 한 줄 — renderSummary() 의 add() 와 같은
+// b+span 패턴을 재사용한다(새 시각 언어를 더하지 않는다).
+function addDetailLine(container, label, value) {
+  const p = document.createElement("p");
+  p.className = "detail-line";
+  const b = document.createElement("b"); b.textContent = value;
+  const s = document.createElement("span"); s.textContent = " " + label;
+  p.appendChild(b); p.appendChild(s);
+  container.appendChild(p);
+}
+
+// 1차/2차/3차 표 — open·closed 상세 둘 다 이 표를 그대로 쓴다(closed 도
+// "매수는 위와 같이" 보여준다, 지시문). 미체결 뒤은 "대기 중"과 함께
+// 1차가 대비 몇 % 아래인지 보여준다(지시문) — 지정가가 없으면(orders 가
+// 비어있는 손상 기록) 그 계산 자체를 건너뛴다.
+function buildRungsTable(p) {
+  const rungs = orderRungs(p);
+  const firstPrice = p.buys && p.buys.length ? p.buys[0].price : null;
+
+  const table = document.createElement("table");
+  table.className = "detail-table";
+  const thead = document.createElement("thead");
+  const htr = document.createElement("tr");
+  for (const h of ["구분", "지정가", "체결가", "체결 시각"]) {
+    const th = document.createElement("th");
+    th.textContent = h;
+    htr.appendChild(th);
+  }
+  thead.appendChild(htr);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const rung of rungs) {
+    const tr = document.createElement("tr");
+    cell(tr, rung.label);
+    cell(tr, rung.limitPrice === null ? "-" : fmt(rung.limitPrice));
+    if (rung.filled) {
+      cell(tr, fmt(rung.filledPrice));
+      cell(tr, fmtFillMoment(rung.filledDate, rung.filledTime));
+    } else {
+      const td = document.createElement("td");
+      td.colSpan = 2;
+      const belowPct = (firstPrice !== null && rung.limitPrice !== null)
+        ? pct(firstPrice, rung.limitPrice) : null;
+      td.textContent = "대기 중" + (belowPct === null ? "" : " (" + fmtPct(belowPct) + ")");
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  return table;
+}
+
+// open 상세 — 1/2/3차 표 + 익절선/손절선 + 지정가 수정 폼. 익절선/손절선은
+// 지금 체결된 매수가만으로 계산한다(ordTakeProfit/ordStopLoss, 위 절) —
+// 물타기 전이면 그 시점 기준의 목표가다. 손절선은 3차 체결 전엔 아예
+// 없다(설계 §2) — "없음"이 아니라 "왜 없는지"를 그대로 문구로 남긴다.
+function renderOpenDetail(p) {
+  const frag = document.createElement("div");
+  frag.appendChild(buildRungsTable(p));
+
+  const filledPrices = (p.buys || []).map(b => b.price);
+  const lines = document.createElement("div");
+  lines.className = "detail-lines";
+  addDetailLine(lines, "익절선", fmt(ordTakeProfit(filledPrices)));
+  addDetailLine(lines, "손절선",
+    filledPrices.length < 3 ? "3차 체결 후 발동" : fmt(ordStopLoss(filledPrices)));
+  frag.appendChild(lines);
+
+  frag.appendChild(renderOrdersAmendForm(p));
+  return frag;
+}
+
+// closed 상세 — 매수 쪽은 open 과 같은 표(buildRungsTable), 그 아래 매도
+// 정보(가격/날짜/사유)를 붙인다. exits 가 비어 있는데도 여기 온 경우는
+// status/exits 불일치(rows() 의 mismatch, status="closed" 인데 exits=[])
+// 뿐이다 — 손편집으로만 생기는 손상이라 크래시 대신 그 사실을 문구로
+// 드러낸다.
+function renderClosedDetail(p) {
+  const frag = document.createElement("div");
+  frag.appendChild(buildRungsTable(p));
+
+  const exits = p.exits || [];
+  const exit = exits.length ? exits[exits.length - 1] : null;
+  const lines = document.createElement("div");
+  lines.className = "detail-lines";
+  if (exit) {
+    addDetailLine(lines, "매도가", fmt(exit.price));
+    addDetailLine(lines, "매도일", exit.date || "-");
+    // reason 은 자동 체결이면 "자동익절"/"자동손절"(models._FILL_REASON)
+    // 이 이미 들어있다 — 수동 매도는 사용자가 적은 자유 텍스트(빈 문자열
+    // 일 수 있다)라 그 둘과 구분되게 "(수동)" 을 붙인다.
+    const AUTO_REASONS = new Set(["자동익절", "자동손절"]);
+    const reasonSuffix = AUTO_REASONS.has(exit.reason) ? "" : " (수동)";
+    addDetailLine(lines, "사유", (exit.reason || "(사유 없음)") + reasonSuffix);
+    if (exit.minute_verified === false) {
+      const note = document.createElement("p");
+      note.className = "detail-note-warn";
+      note.textContent = "분봉이 아니라 일봉만으로 판정된 체결입니다 — 정확한 체결 시각은 알 수 없습니다.";
+      lines.appendChild(note);
+    }
+  } else {
+    const note = document.createElement("p");
+    note.className = "detail-note-warn";
+    note.textContent = "매도 기록을 찾을 수 없습니다(상태 불일치) — positions.json 을 확인해주세요.";
+    lines.appendChild(note);
+  }
+  frag.appendChild(lines);
+  return frag;
+}
+
+// pending 상세 — 목표가·등록일·마감일·남은 거래일. 마감일 계산은
+// remainingWatchDays 옆 주석과 같은 근거(watch.days 없는 옛 기록은 서버
+// 기본값 5 를 가정)를 쓰되, 남은 일수 자체는 remainingWatchDays 를 그대로
+// 재사용한다(같은 계산을 두 번 다르게 적으면 갈릴 수 있어서).
+function renderPendingDetail(p, quotes) {
+  const watch = p.watch || {};
+  const days = quotes.trading_days || [];
+  const dayIndex = new Map(days.map((d, i) => [d, i]));
+  const last = days.length ? days[days.length - 1] : null;
+
+  const lines = document.createElement("div");
+  lines.className = "detail-lines";
+  addDetailLine(lines, "지정가(관찰가)", typeof watch.price === "number" ? fmt(watch.price) : "-");
+  addDetailLine(lines, "등록일", watch.date || "-");
+
+  let deadlineDate = "-";
+  if (typeof watch.date === "string") {
+    const watchIdx = dayIndex.get(watch.date);
+    const n = typeof watch.days === "number" ? watch.days : 5;
+    if (watchIdx !== undefined && watchIdx + n < days.length) deadlineDate = days[watchIdx + n];
+  }
+  addDetailLine(lines, "마감일(거래일 기준)", deadlineDate);
+
+  const remaining = remainingWatchDays(dayIndex, days, last, watch);
+  addDetailLine(lines, "남은 거래일",
+    remaining === null ? "-" : (remaining >= 0 ? "D-" + remaining : "기한 지남"));
+  return lines;
+}
+
+// expired 상세 — 못 닿은 목표가와 만료 확정일(watch.expired_on, apply_expire
+// 가 남긴다). "이 스크리너의 신호가 기한 안에 안 왔다"도 결과다(지시문
+// 결정 4) — 그 사실 그대로만 보여준다.
+function renderExpiredDetail(p) {
+  const watch = p.watch || {};
+  const lines = document.createElement("div");
+  lines.className = "detail-lines";
+  addDetailLine(lines, "지정가(관찰가)", typeof watch.price === "number" ? fmt(watch.price) : "-");
+  addDetailLine(lines, "만료일", watch.expired_on || "-");
+  return lines;
+}
+
+// 지정가 수정 — 2차·3차 지정가를 손으로 고친다. 서버 연산(apply_orders,
+// scripts/models.py)은 이미 있고 테스트도 있는데 화면에 입력 경로가
+// 없었다(지시문). type=text+inputmode=numeric 을 쓴다 — #price 와 같은
+// 이유(parsePrice 옆 주석): "247,500" 처럼 콤마 포함 입력이 type=number
+// 에서는 통째로 버려진다.
+function renderOrdersAmendForm(p) {
+  const wrap = document.createElement("div");
+  wrap.className = "detail-amend-orders";
+
+  const heading = document.createElement("div");
+  heading.className = "detail-amend-heading";
+  heading.textContent = "지정가 수정";
+  wrap.appendChild(heading);
+
+  const mkField = (labelText, cls, value) => {
+    const field = document.createElement("div");
+    field.className = "field";
+    const label = document.createElement("label");
+    label.textContent = labelText;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.inputMode = "numeric";
+    input.className = cls;
+    input.value = typeof value === "number" ? String(value) : "";
+    field.appendChild(label);
+    field.appendChild(input);
+    return field;
+  };
+
+  const orders = p.orders || {};
+  wrap.appendChild(mkField("2차 지정가", "orders-buy2-input", orders.buy2));
+  wrap.appendChild(mkField("3차 지정가", "orders-buy3-input", orders.buy3));
+
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "orders-save-btn";
+  saveBtn.textContent = "저장";
+  saveBtn.dataset.id = p.id;
+  wrap.appendChild(saveBtn);
+
+  return wrap;
+}
+
+function renderDetailContent(r, quotes) {
+  if (r.pending) return renderPendingDetail(r.p, quotes);
+  if (r.expired) return renderExpiredDetail(r.p);
+  if (r.closed) return renderClosedDetail(r.p);
+  return renderOpenDetail(r.p);
+}
+
+function buildDetailRow(r, colCount, quotes) {
+  const tr = document.createElement("tr");
+  tr.className = "detail-row";
+  tr.id = "detail-" + r.p.id;
+  const td = document.createElement("td");
+  td.colSpan = colCount;
+  td.appendChild(renderDetailContent(r, quotes));
+  tr.appendChild(td);
+  return tr;
 }
 
 // 지수 대비 수익률(설계 §6-2) — from/to 두 날짜 모두 benchmark_history[idx]
@@ -821,8 +1220,8 @@ function renderData(state, quotes, flags) {
   try {
     renderStale(quotes, flags || {});
     const all = rows(state, quotes);
-    renderTable("open", all.filter(r => !r.closed));
-    renderTable("closed", all.filter(r => r.closed));
+    renderTable("open", all.filter(r => !r.closed), quotes);
+    renderTable("closed", all.filter(r => r.closed), quotes);
     renderSummary(all, quotes);
     renderBenchmark(quotes);
   } catch (e) {
@@ -835,6 +1234,13 @@ function renderData(state, quotes, flags) {
 let MASTER = [], NAMES = new Map(), STATE = { positions: [] }, QUOTES = {};
 let MASTER_PRICES = new Map();   // 코드 → 가격(있으면 int, 없으면 null) — 항목 18
 let masterLoadFailed = false;    // 제출 시 안내 문구를 바꾸는 데만 쓴다
+// 펼쳐진 상세행의 id 집합(신규: 행 상세) — DOM 이 아니라 모듈 전역에
+// 둔다. refreshAfterWrite() 는 저장 몇 초 뒤 renderData() 를 다시 불러
+// 표 전체를 새로 그리는데, 펼침 상태가 DOM 에만 있으면 그 재렌더가 사용자가
+// 방금 연 상세행을 조용히 접어버린다(지시문 제약 1). renderTable/nameCell
+// 이 매 렌더마다 이 Set 을 그대로 다시 읽으므로, 재렌더 자체가 몇 번
+// 일어나든 이 Set 을 건드리지 않는 한 펼침 상태는 그대로 남는다.
+let EXPANDED_IDS = new Set();
 // main() 의 최초 로드가 얻은 성패 — renderData() 는 이 값을 다시 계산하지
 // 않고 그대로 받는다(rows/renderTable 등과 달리 성패는 fetch 결과에서만
 // 나온다). refreshAfterWrite() 가 재조회에 성공하면 positionsFailed 를
@@ -1207,6 +1613,55 @@ function onDeleteButtonClick(e) {
   // 구간 안에서 실행돼야 한다).
   writeRecord({ op: "delete", id, was: code, was_price: price },
               "DELETE " + name, name);
+}
+
+// 상세행 펼침/접힘(신규) — 위임 클릭(제약 2, onAmendButtonClick 과 같은
+// 패턴). 이름을 <button> 으로 바꿔둔 덕(nameCell)에 Enter/Space 는 브라우저
+// 기본 동작이 이미 click 이벤트를 내므로 여기서 따로 키보드를 다루지
+// 않는다(제약 3). 펼침 자체는 EXPANDED_IDS(모듈 전역)만 바꾸고 실제
+// DOM 갱신은 renderData() 재호출에 맡긴다 — renderTable/nameCell 이 이미
+// 이 Set 을 읽어 그리므로 별도의 부분 DOM 조작이 필요 없다.
+function onNameToggleClick(e) {
+  const btn = e.target.closest(".name-toggle");
+  if (!btn) return;
+  const id = btn.dataset.id;
+  if (EXPANDED_IDS.has(id)) EXPANDED_IDS.delete(id); else EXPANDED_IDS.add(id);
+  renderData(STATE, QUOTES, LOAD_FLAGS);
+  // renderTable 이 tbody 를 통째로 새로 만들어 방금 누른 버튼 자체가
+  // 사라진다 — 키보드로 조작한 사용자의 포커스가 문서 전체로 날아가지
+  // 않도록 같은 id 의 새 버튼을 찾아 되돌려준다.
+  const again = document.querySelector('.name-toggle[data-id="' + CSS.escape(id) + '"]');
+  if (again) again.focus();
+}
+
+// 지정가(2차·3차) 수정 저장(신규) — 자동토글/삭제와 같은 즉시-전송
+// 패턴(폼을 거치지 않는다, onAutoToggleButtonClick 옆 주석 참조).
+// apply_orders(scripts/models.py)가 3차<2차<1차 부등식을 서버에서도
+// 거부하지만, 왕복 한 번으로 그걸 알게 하는 대신 여기서 먼저 걸러
+// 사용자 경험을 지킨다(지시문) — 서버 검증을 대체하는 게 아니라 보충한다.
+function onOrdersSaveButtonClick(e) {
+  const btn = e.target.closest(".orders-save-btn");
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const p = STATE.positions.find(x => x.id === id);
+  if (!p || !isReadablePosition(p)) {
+    alert("이 기록을 표에서 찾을 수 없습니다 — 새로고침 후 다시 시도해주세요.");
+    return;
+  }
+  const wrap = btn.closest(".detail-amend-orders");
+  const buy2 = parsePrice(wrap.querySelector(".orders-buy2-input").value);
+  const buy3 = parsePrice(wrap.querySelector(".orders-buy3-input").value);
+  const first = p.buys[0].price;
+  if (!(buy2 > 0) || !(buy3 > 0)) { alert("지정가를 확인해주세요."); return; }
+  if (!(buy3 < buy2 && buy2 < first)) {
+    alert("지정가 순서를 확인해주세요 — 3차 < 2차 < 1차 체결가(" + fmt(first) + "원) 이어야 합니다.");
+    return;
+  }
+  const name = p.name || p.code || "?";
+  // await 하지 않는다 — writeRecord() 의 window.open 이 아직 이 클릭
+  // 이벤트와 같은 동기 구간 안에서 실행돼야 팝업 차단을 피한다(같은
+  // 요령을 쓰는 onAutoToggleButtonClick/onDeleteButtonClick 옆 주석 참조).
+  writeRecord({ op: "orders", id, was: p.code, buy2, buy3 }, "ORDERS " + name, name);
 }
 
 // id 로 STATE 에서 기록을 찾아 amend 폼을 채운다. **재조회하지 않는다** —
@@ -1922,6 +2377,14 @@ document.getElementById("open").addEventListener("click", onAutoToggleButtonClic
 // #closed 에 있다) — 그래서 amend 와 같은 두 표 모두에 건다.
 document.getElementById("open").addEventListener("click", onDeleteButtonClick);
 document.getElementById("closed").addEventListener("click", onDeleteButtonClick);
+// 상세행 토글(신규)은 이름 칸이 두 표 모두에 나오므로 양쪽에 건다 — 위
+// 삭제 버튼과 같은 이유.
+document.getElementById("open").addEventListener("click", onNameToggleClick);
+document.getElementById("closed").addEventListener("click", onNameToggleClick);
+// 지정가 수정 폼은 open 상세행에만 나온다(renderOrdersAmendForm 은
+// renderOpenDetail 에서만 불린다, 위 참조) — #closed 에는 이 버튼 자체가
+// 없으니 거기엔 안 건다(자동토글 버튼과 같은 판단 — 위 주석 참조).
+document.getElementById("open").addEventListener("click", onOrdersSaveButtonClick);
 
 // main() 은 더 이상 이 자리에서 즉시 실행되지 않는다 — 통과 커튼(맨 아래
 // 절)이 통과된 뒤에만(이미 통과해 있었으면 로드 즉시, 아니면 #gate-form

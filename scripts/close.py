@@ -54,6 +54,22 @@
     파일과, 그 뒤 분할·증자가 생긴 다음 이 모듈이 소급 채운 같은 날짜
     파일은 그 비율만큼 어긋날 수 있다 — `price_basis` 필드로 그 사실을
     스냅샷 자체에 남긴다(자세한 근거는 `snapshot_for` docstring).
+
+무동작(silent no-op) 감사(2026-08-21) 반영:
+
+12. **결함5 — 자동 체결의 재시도 창을 `history/` 존재 여부와 분리했다.**
+    예전엔 `sorted(set(todo) | {latest})` 만 `autofill.run` 에 넘겼다 —
+    캐치업 날짜(latest 가 아닌 날)에서 `naver.fetch_minute` 이 한 번
+    실패하면(네트워크 등, autofill.py 는 이를 "다음 실행이 다시 잡는다"는
+    전제로 조용히 넘긴다) 그 전제가 실제로는 거짓이었다: 그 날짜의
+    `history/{day}.json` 은 이 실패와 무관하게 이미 쓰였으므로
+    `missing_days` 가 다음 실행부터 그 날짜를 다시 보지 않고, `latest`
+    도 아니니 다시는 `autofill.run` 에 넘어오지 않는다 — 그 실패로 놓친
+    체결(2차·3차 매수)이 영구히 사라진다(3차가 없으면 손절선이 안 켜져
+    그 포지션은 이후 익절로만 닫힐 수 있다 — 승률이 조용히 부풀려진다).
+    고친 방법은 아래 자동 체결 배선 지점의 주석에 자세히 남겼다 —
+    요약하면 분봉 재생 창(`autofill.MINUTE_WINDOW_DAYS`≈7거래일) 안의
+    모든 거래일을 `history/` 존재 여부와 무관하게 매 실행 다시 넘긴다.
 """
 from __future__ import annotations
 
@@ -334,21 +350,45 @@ def main() -> int:
     if fetch_failed:
         print(f"[경고] 일봉 실패 {len(fetch_failed)}건 — 자동 체결을 건너뛴다(다음 실행이 재시도)")
     else:
-        # 결함2(2026-08-21 감사): 예전엔 latest 하루만 넘겼다 — cron 이
-        # 하루를 통째로 드롭하거나(모듈 독스트링) fetch_failed 로 하루를
-        # 건너뛰면, 그날 체결은 영영 안 잡혔다. "한 번 걸러도 다음 런이
-        # 메운다"는 history/ 에만 성립하는 얘기였다(missing_days 는 파일이
-        # 있으면 다시 안 보지만, autofill 은 애초에 latest 아닌 날을 본
-        # 적이 없어 "다시 안 본다" 조차 성립하지 않았다).
-        #
-        # todo(위에서 이미 계산해둔, missing_days 로 구한 최근 미백필
-        # 거래일 목록 — WINDOW=30 거래일로 이미 유계이고 오름차순=오래된
-        # 순서다)를 그대로 재사용한다. 새 상수나 새 스캔을 만들지 않는다
-        # — bars 도 이미 그 창(WINDOW*2=60거래일)을 덮고도 남게 받아뒀다
-        # (위 주석). latest 를 합집합으로 강제 포함하는 이유: gh.list_dir
+        # 예전엔 latest 하루만 넘겼다 — cron 이 하루를 통째로 드롭하거나
+        # (모듈 독스트링) fetch_failed 로 하루를 건너뛰면, 그날 체결은
+        # 영영 안 잡혔다. "한 번 걸러도 다음 런이 메운다"는 history/ 에만
+        # 성립하는 얘기였다(missing_days 는 파일이 있으면 다시 안 보지만,
+        # autofill 은 애초에 latest 아닌 날을 본 적이 없어 "다시 안 본다"
+        # 조차 성립하지 않았다). todo(missing_days 로 구한, WINDOW=30
+        # 거래일로 유계인 백필 대상)를 재사용해 놓친 날짜도 오래된 순으로
+        # 넘긴다. latest 를 합집합으로 강제 포함하는 이유: gh.list_dir
         # 실패로 todo=[] 가 되더라도(위 8번 리뷰) 오늘 하루치 자동 체결까지
-        # 같이 굶으면 안 된다 — 최소한 지금까지의 동작(latest 는 매번
-        # 처리)은 어떤 경우에도 유지한다.
+        # 같이 굶으면 안 된다.
+        #
+        # **결함5(2026-08-21 무동작 감사): 재시도 창을 history/ 존재 여부와
+        # 완전히 분리한다.** `todo | {latest}` 만으로는 부족했다 —
+        # `naver.fetch_minute` 이 한 종목에서 한 번 실패하면 autofill.py 는
+        # 그 실패를 조용히 넘긴다("다음 실행이 다시 잡는다"는 전제, 그
+        # 함수 안의 주석 참조). 그런데 위 백필 루프가 이 캐치업 날짜의
+        # history/{day}.json 을 (이 실패와 무관하게, autofill 실행 여부와
+        # 상관없이) 이미 써버렸으므로, missing_days 는 다음 실행부터 이
+        # 날짜를 다시 안 본다 — `todo` 에서 영구히 빠지고, `latest` 도
+        # 아니니 다시는 autofill.run 에 넘어오지 않는다. 그 실패로 놓친
+        # 체결(예: 2차 매수)이 영영 복구되지 않는다 — 손절선은 3차 체결
+        # 후에만 켜지므로, 그 포지션은 이후 익절로만 닫힐 수 있게 되어
+        # 승률이 조용히 부풀려진다(실측 재현: tests/test_close.py 참조).
+        #
+        # 고친 방법: `history/` 존재 여부와 무관하게, 분봉 재생 창
+        # (autofill.MINUTE_WINDOW_DAYS≈7거래일) 안의 모든 거래일을 매
+        # 실행마다 다시 autofill.run 에 넘긴다. `naver.fetch_minute` 이
+        # 실패할 수 있는 유일한 구간이 바로 이 창 안이므로(창을 넘긴
+        # 날짜는 애초에 그 함수를 안 부르고 일봉으로만 확정한다), 이
+        # 범위를 다시 시도하기만 하면 어떤 날짜의 일시적 실패도 이 창이
+        # 닫히기 전에 여러 번 재시도된다. `since_for()`/`orders.replay`
+        # 의 since 가드(모듈 독스트링, "하루 두 번 도는 cron" 사고 방지)가
+        # 이미 체결된 구간의 중복 재생을 막으므로, 이미 끝난 날짜를 다시
+        # 넘겨도 안전하다 — touched() 로 거른 뒤 실제로 닿은 종목만
+        # 분봉을 다시 청구하므로 비용도 거의 없다(다른 옵션 — history 쓰기를
+        # autofill 성공에 묶거나, 실패를 problems 에 얹어 rc=1 로만 드러내는
+        # 것 — 은 전자는 autofill.run 의 반환값이 이 특정 실패를 구분 못 해
+        # 신호를 못 만들고, 후자는 사람이 손으로 개입해야만 복구돼 자동
+        # 회복이 안 된다).
         #
         # 거래일 각각을 오래된 순으로 따로따로 처리한다 — 하루치 매수가
         # 다음 날의 사다리(2차·3차 지정가)를 바꾸므로 순서가 바뀌면 안
@@ -357,7 +397,8 @@ def main() -> int:
         # 실패해도(문제가 problems 에 쌓인다) 나머지 날짜는 계속
         # 시도한다 — 한 종목/하루의 실패가 다른 날의 체결까지 막으면
         # 안 된다는 이 파일의 기존 원칙과 같다.
-        for d in sorted(set(todo) | {latest}):
+        retry_window = cal.recent(days, autofill.MINUTE_WINDOW_DAYS + 1)
+        for d in sorted(set(todo) | set(retry_window) | {latest}):
             if autofill.run(bars, d, days):
                 problems.append(f"자동 체결 쓰기 실패: {d}")
 

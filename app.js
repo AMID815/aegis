@@ -680,14 +680,63 @@ const fmt = n => n === null || n === undefined ? "-" : Math.round(n).toLocaleStr
 const fmtPct = n => n === null ? "-" : (n > 0 ? "+" : "") + n.toFixed(2) + "%";
 const cls = n => n === null ? "" : (n > 0 ? "up" : n < 0 ? "down" : "");
 
+// 표마다 칸 구성이 다르다(신규: 자동매수 대기 표 분리) — 대기(pending)
+// 표엔 수익률 열 자체가 없다(아직 아무것도 안 샀으니 보여줄 수익률이
+// 없다 — 매번 "-"만 채우는 열을 두는 대신 애초에 그 열을 안 만드는 쪽이
+// 정직하다). renderTable() 하나가 세 모양(대기/보유중/종결)을 전부
+// 욱여넣는 대신, id 별로 "이 칸에 뭘 넣을지"를 스펙 함수로 선언해두고 그
+// 스펙이 돌려주는 개수만큼만 <td> 를 만든다 — 상세행 colspan(colCount,
+// renderTable 참조)은 여전히 index.html 의 실제 헤더 개수를 센 값이므로,
+// 스펙과 헤더가 어긋나면(칸 하나를 빠뜨리거나 더 넣으면) 상세행 폭이
+// 표 폭과 안 맞아 그 자리에서 드러난다 — 숫자를 하드코딩했다면 조용히
+// 어긋났을 지점이다.
+
+// 보유중(open)·종결(closed) 두 표가 공유하는 다섯 칸 — 매입가·현재가
+// (종결 표에선 매도가)·수익률·보유·출처. 종결 표는 이제 만료(expired)
+// 기록도 담는다(지시문 — "이 스크리너의 신호가 끝내 안 왔다"도 결과라
+// 종결 쪽에 둔다) — 만료 행은 buy 만 watch.price(목표가, rows() 참조)로
+// 차 있고 now/ret 는 이미 null 이다. "미체결"이라고 그 자체로 말해야지
+// "-"(계산했는데 값이 없음과 구분이 안 된다)로 뭉개면 "안 샀다"는
+// 사실이 "몰라서 못 구했다"와 헷갈린다. buy 도 실제 매입가가 아니라
+// 목표가일 뿐이므로 "(목표가)"를 붙여 체결된 것처럼 안 읽히게 한다
+// (요구사항 3). 보유도 "범위 밖"(계산은 시도했는데 달력이 짧아 못 구함)
+// 과 구분되게 "—"(애초에 보유 자체가 없었다)로 다르게 쓴다.
+function positionCells(r) {
+  return [
+    { value: fmt(r.buy) + (r.expired ? " (목표가)" : "") },
+    { value: r.expired ? "미체결" : fmt(r.now) },
+    { value: r.expired ? "미체결" : fmtPct(r.ret), cls: cls(r.ret) },
+    { value: r.expired ? "—" : (r.held === null ? "범위 밖" : r.held + "일") },
+    { value: r.p.source || "(출처 없음)" },   // positions.json 은 normalize() 를 안 거친다 — 필드 누락 가능
+  ];
+}
+
+// 대기(pending) 표 전용 네 칸 — 지정가·현재가·남은 기간·출처. 현재가는
+// quotes.quotes 에 이 코드가 있을 때만 채워진다(rows() 참조) —
+// scripts/quotes.py open_codes() 는 status="open" 코드만 조회하므로,
+// 순수 대기 종목은 보통 여기 없다(개별 누락은 조용히 "-" — 항목 8 과
+// 같은 처리). 남은 기간은 remainingWatchDays(rows() 가 이미 계산)를
+// 그대로 문구로 옮긴다 — "범위 밖"이라는 말은 이미 보유가 시작된
+// 기록에나 맞으므로 여기선 쓰지 않는다(rows() 옆 주석과 같은 이유).
+function pendingCells(r) {
+  return [
+    { value: fmt(r.buy) },
+    { value: fmt(r.now) },
+    { value: r.remainingDays === null ? "-" : (r.remainingDays >= 0 ? "D-" + r.remainingDays : "기한 지남") },
+    { value: r.p.source || "(출처 없음)" },
+  ];
+}
+
+const TABLE_ROW_CELLS = { pending: pendingCells, open: positionCells, closed: positionCells };
+
 function renderTable(id, list, quotes) {
   const tb = document.querySelector("#" + id + " tbody");
   tb.textContent = "";
   // 상세행의 colspan — 하드코딩하지 않고 실제 헤더 개수를 센다(제약 4).
-  // #open 과 #closed 의 헤더 문구는 다르지만(매입가/현재가 대 매입가/
-  // 매도가) 개수는 지금 둘 다 6이다 — 그래도 하드코딩하면 다음에 한
-  // 표에만 열을 추가했을 때 조용히 어긋난다.
+  // 표 셋(대기 5열, 보유중/종결 6열)의 헤더 개수가 서로 달라졌으므로
+  // 이 값을 표마다 다시 세는 게 이제는 장식이 아니라 필수다.
   const colCount = document.querySelectorAll("#" + id + " thead th").length;
+  const buildCells = TABLE_ROW_CELLS[id];
   for (const r of list) {
     const tr = document.createElement("tr");
     // 독립된 문제들이라 동시에 나올 수 있다(예: 상태 불일치이면서 동시에
@@ -718,25 +767,7 @@ function renderTable(id, list, quotes) {
     // 삭제하는 중) — 위 else-if 사슬 밖에서 독립적으로 덧붙인다.
     if (WRITE_LOCKED_IDS.has(r.p.id)) mark += " [처리 중]";
     nameCell(tr, r, mark);
-    cell(tr, fmt(r.buy));
-    cell(tr, fmt(r.now));
-    cell(tr, fmtPct(r.ret), cls(r.ret));
-    // pending 은 남은 유효 기간(remainingDays 를 구할 수 있으면)을 보여준다
-    // — "범위 밖"(=달력 범위 밖이라 못 구함)이라는 문구는 이미 보유가
-    // 시작된 기록에나 맞는 말이라 아직 세기 시작도 안 한 pending 에는
-    // 사실과 다르게 읽힌다. expired 는 더 이상 셀 보유일수 자체가 없으므로
-    // "-"다(만료 시점은 표에 안 보이지만 watch.expired_on 에 남아있다).
-    let heldCell;
-    if (r.pending) {
-      heldCell = r.remainingDays === null ? "-"
-               : (r.remainingDays >= 0 ? "D-" + r.remainingDays : "기한 지남");
-    } else if (r.expired) {
-      heldCell = "-";
-    } else {
-      heldCell = r.held === null ? "범위 밖" : r.held + "일";
-    }
-    cell(tr, heldCell);
-    cell(tr, r.p.source || "(출처 없음)");   // positions.json 은 normalize() 를 안 거친다 — 필드 누락 가능
+    for (const c of buildCells(r)) cell(tr, c.value, c.cls);
     tb.appendChild(tr);
 
     // 상세행 — EXPANDED_IDS(모듈 전역, 제약 1)에 있으면 이 재렌더에서도
@@ -1238,10 +1269,29 @@ function renderData(state, quotes, flags) {
   try {
     renderStale(quotes, flags || {});
     const all = rows(state, quotes);
-    renderTable("open", all.filter(r => !r.closed), quotes);
-    renderTable("closed", all.filter(r => r.closed), quotes);
+    // 세 표로 가른다(신규: 자동매수 대기 표 분리) — 대기(pending)만 따로
+    // 빼고, 만료(expired)는 종결 쪽에 남긴다: "이 스크리너의 신호가 끝내
+    // 안 왔다"도 그 자체로 결과이지 "아직 기다리는 중"이 아니라서(사용자
+    // 결정 — renderSummary 가 만료를 미결과 따로 세는 것과 같은 근거),
+    // 대기 표에 남겨 헷갈리게 하는 대신 종결과 함께 묶는다. bad(손상)
+    // 기록은 원래 status 로 정해진 r.closed 를 그대로 따르고(변경 없음),
+    // pending/expired 는 절대 bad 로 뜨지 않으므로(rows() 참조) 아래 세
+    // 필터는 서로 겹치지 않는다 — 모든 행이 정확히 한 표에만 들어간다.
+    const pendingList = all.filter(r => r.pending);
+    renderTable("pending", pendingList, quotes);
+    renderTable("open", all.filter(r => !r.closed && !r.pending && !r.expired), quotes);
+    renderTable("closed", all.filter(r => r.closed || r.expired), quotes);
     renderSummary(all, quotes);
     renderBenchmark(quotes);
+
+    // 빈 대기 표는 제목만 남는 빈 표로 보이면 안 된다(지시문 요구사항
+    // 6) — 대기 기록이 하나도 없으면 섹션 전체를 접는다(제목 + <table>
+    // 뿐이라 폼 컨트롤이 전혀 없다 — tests/test_index_html.py 의 "숨겨진
+    // required" 가드와 무관하다). #stale 배지가 이미 쓰는 것과 같은
+    // "본문 없으면 숨긴다" 패턴(el.hidden = msgs.length === 0)을 그대로
+    // 따른다.
+    const pendingSection = document.getElementById("pending-section");
+    if (pendingSection) pendingSection.hidden = pendingList.length === 0;
   } catch (e) {
     reportFatal(e);
   }
@@ -2527,25 +2577,31 @@ document.getElementById("form").addEventListener("submit", ev => {
   onSubmit(ev);
 });
 document.getElementById("cancel-btn").addEventListener("click", exitAmendMode);
+// 고치기 버튼은 pending/expired 행엔 아예 안 그려진다(nameCell 참조) —
+// #pending 표에는 그 버튼이 나올 일이 없으니 안 건다(자동토글 버튼과
+// 같은 판단 — 아래 주석 참조).
 document.getElementById("open").addEventListener("click", onAmendButtonClick);
 document.getElementById("closed").addEventListener("click", onAmendButtonClick);
-// 자동/수동 토글 버튼은 #open(보유 중 — open/pending 이 여기 그려진다)에만
-// 나온다(nameCell 이 r.closed 인 행에는 아예 안 그린다) — 그래도 #closed
-// 에 걸어도 해가 되진 않지만, 실제로 쓰이지 않을 리스너를 다는 대신
-// 렌더가 실제로 그 버튼을 두는 표 하나에만 건다.
+// 자동/수동 토글 버튼은 !r.closed && !r.expired 인 행에만 그려진다
+// (nameCell 참조) — 이제 그 조건을 만족하는 행은 #open(보유중, open만)
+// 과 #pending(대기) 둘 뿐이다(만료는 종결로 옮겨 이 조건을 더 이상
+// 만족하지 않는다). #closed 에는 실제로 쓰이지 않을 리스너를 다는 대신
+// 렌더가 실제로 그 버튼을 두는 표에만 건다.
 document.getElementById("open").addEventListener("click", onAutoToggleButtonClick);
-// 삭제 버튼은 고치기와 달리 #open/#closed 양쪽 다 그려진다(bad/pending/
-// expired 는 status 값에 따라 어느 표에든 있을 수 있고, 정상 종결 기록은
-// #closed 에 있다) — 그래서 amend 와 같은 두 표 모두에 건다.
+document.getElementById("pending").addEventListener("click", onAutoToggleButtonClick);
+// 삭제 버튼은 고치기와 달리 id 만 있으면 어느 표든 그려진다(bad/pending/
+// expired 도 포함) — 그래서 세 표 모두에 건다.
 document.getElementById("open").addEventListener("click", onDeleteButtonClick);
 document.getElementById("closed").addEventListener("click", onDeleteButtonClick);
-// 상세행 토글(신규)은 이름 칸이 두 표 모두에 나오므로 양쪽에 건다 — 위
+document.getElementById("pending").addEventListener("click", onDeleteButtonClick);
+// 상세행 토글(신규)은 이름 칸이 세 표 모두에 나오므로 전부 건다 — 위
 // 삭제 버튼과 같은 이유.
 document.getElementById("open").addEventListener("click", onNameToggleClick);
 document.getElementById("closed").addEventListener("click", onNameToggleClick);
+document.getElementById("pending").addEventListener("click", onNameToggleClick);
 // 지정가 수정 폼은 open 상세행에만 나온다(renderOrdersAmendForm 은
-// renderOpenDetail 에서만 불린다, 위 참조) — #closed 에는 이 버튼 자체가
-// 없으니 거기엔 안 건다(자동토글 버튼과 같은 판단 — 위 주석 참조).
+// renderOpenDetail 에서만 불린다, 위 참조) — #closed/#pending 에는 이
+// 버튼 자체가 없으니 거기엔 안 건다(자동토글 버튼과 같은 판단 — 위 주석 참조).
 document.getElementById("open").addEventListener("click", onOrdersSaveButtonClick);
 
 // main() 은 더 이상 이 자리에서 즉시 실행되지 않는다 — 통과 커튼(맨 아래

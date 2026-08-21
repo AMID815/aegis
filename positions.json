@@ -10,7 +10,13 @@
     }
    ],
    "code": "005930",
-   "exits": [],
+   "exits": [
+    {
+     "date": "2026-08-21",
+     "price": 350000,
+     "reason": ""
+    }
+   ],
    "id": "20260821-005930",
    "memo": "",
    "name": "삼성전자",
@@ -22,7 +28,7 @@
    },
    "signal_date": null,
    "source": "상단눌림",
-   "status": "open"
+   "status": "closed"
   },
   {
    "adjustments": [],

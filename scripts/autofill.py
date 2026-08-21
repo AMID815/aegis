@@ -187,8 +187,19 @@ def run(bars: dict, day: str, days_list: list) -> int:
     # 대기 주문(pending) 먼저 본다 — 오늘 체결되면 그 뒤 물타기·익절
     # 판정까지 같은 실행에서 이어져야 한다(같은 날 매수·매도가 나는
     # 경우를 다음 실행으로 미루면 그만큼 분봉 창을 까먹는다).
-    for p in [x for x in state["positions"]
-              if x["status"] == models.PENDING and x.get("auto", True)]:
+    #
+    # **결함8(2026-08-21 무동작 감사): `auto` 로 거르지 않는다.** 예전엔
+    # 이 리스트 컴프리헨션이 `x.get("auto", True)` 까지 걸러서, auto:false
+    # 인 pending 기록은 아래 만료 판정 자체에 도달하지 못했다 —
+    # `apply_auto` 의 계약(설계 §8, "자동매도뿐 아니라 자동매수(2차·3차)도
+    # 같이 멈춘다")은 **매매**를 말하는 것이지 **장부 정리**(만료 표시)를
+    # 말하는 게 아니다. 사용자가 "이 종목은 내 손으로 매매하겠다"고 누른
+    # 체크박스 하나 때문에 그 기록이 영원히 pending 으로 얼어붙어(화면엔
+    # "기한 지남"이 계속 찍히고) 만료(expired) 집계에서 영영 빠지면 안
+    # 된다 — 그 스크리너의 "이 신호는 결국 안 왔다"는 사실 자체는 auto
+    # 와 무관하게 참이다. 그래서 만료 판정은 auto 와 무관하게 항상 하고,
+    # `auto:false` 는 아래(가격 확인·체결) 단계에서만 건너뛴다.
+    for p in [x for x in state["positions"] if x["status"] == models.PENDING]:
         watch = p["watch"]
 
         # 기한부터 본다 — 가격을 보기 전에. 창을 넘긴 뒤 오늘 우연히
@@ -212,6 +223,35 @@ def run(bars: dict, day: str, days_list: list) -> int:
                 continue
             print(f"  관찰 기한 만료: {p['name']} (마감 {deadline} 지남)")
             state = out
+            continue
+        elif deadline is None and cal.watch_date_unreachable(days_list, watch["date"]):
+            # 결함6(2026-08-21 무동작 감사): watch.date 가 애초에 거래일이 아니면
+            # (주말·휴장일에 등록됨 — 페이지가 #date 기본값을 오늘로 채우지만
+            # 사용자가 다른 날짜로 고칠 수 있다) watch_deadline() 은 영원히
+            # None 이다. 그 None 은 "아직 마감일에 도달 못 함"(달력이 자라면
+            # 저절로 풀리는 정상 상태)과 겉모양이 완전히 같지만 뜻은 정반대다
+            # — 이 기록은 **절대** 마감일을 계산할 수 없다. 조용히 pending
+            # 으로 남기면 이 스크리너의 "원래 무효였던 신호"가 만료 집계에서
+            # 영영 빠지고, 그 사이 우연히 가격이 닿으면 소급 체결까지 될 수
+            # 있다(실측: 토요일 등록 → 다음 거래일 가격으로 체결). 즉시
+            # 만료 처리하되 통상 만료("기한 지남")와는 다른 로그를 남긴다 —
+            # 이건 기한을 넘긴 게 아니라 애초에 셀 수 없는 날짜였다.
+            try:
+                fresh, fresh_sha = gh.read_json(POSITIONS, default=models.empty_state())
+                out = models.apply_expire(models.normalize(fresh), p["id"], day)
+                gh.write_json(POSITIONS, out, fresh_sha,
+                              f"관찰 무효(비거래일 등록): {p['name']}")
+            except Exception as e:
+                print(f"[경고] 관찰 무효 처리 쓰기 실패 {p['id']}: {type(e).__name__}: {e}")
+                problems.append(p["id"])
+                continue
+            print(f"  관찰 무효 — 비거래일에 등록됨: {p['name']} (watch.date={watch['date']})")
+            state = out
+            continue
+
+        if not p.get("auto", True):
+            # 결함8: 매매(가격 확인·체결)만 건너뛴다 — 위 두 만료 분기는
+            # 이미 auto 와 무관하게 통과했다.
             continue
 
         # 등록일 당일은 아직 체결 대상이 아니다(결함1, 2026-08-21 감사).

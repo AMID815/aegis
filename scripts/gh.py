@@ -41,9 +41,18 @@ scripts.close`) 진짜 저장소에 쓴다 — 지금 이걸 막는 유일한 �
 - **409(sha 충돌) 및 그 외 4xx/5xx**: sha 가 낡으면 GitHub 는 409 를 준다
   (실측: `PUT` 에 틀린 sha 를 주면 `409 Conflict`, 몸통에
   `"_scratch.json does not match 0000..."` 같은 구체적 사유가 실려온다).
-  세 writer(intake/quotes/close)가 `concurrency: data-write` 그룹으로
-  직렬화돼 있어서 같은 실행 안에서 스스로 409를 낼 일은 없다 — 사람이
-  data 브랜치를 손으로 건드리는 등 바깥 요인일 때만 난다. 그럴 땐 조용히
+  **직렬화는 부분적이다**(2026-08-21 감사가 잡은 잘못된 기록 — 이 자리에는
+  원래 "세 writer 가 전부 `data-write` 그룹이라 스스로 409 를 낼 일은
+  없다"고 적혀 있었는데, 배포된 워크플로와 다르다). 실제로는 quotes.yml 과
+  close.yml 만 `data-write` 를 공유하고, **intake.yml 은 `intake` 라는
+  별도 그룹**이다 — 그쪽 파일 주석이 왜 달라야 하는지 설명해 뒀다(같은
+  그룹에 넣으면 깃허브의 "큐에 하나만 대기" 규칙 때문에 이슈가 몰릴 때
+  조용히 취소되어 아무 댓글도 없이 사라진다).
+  그래서 intake 와 close/autofill 이 **둘 다 positions.json 을 쓰고 서로
+  직렬화되지 않는다** — 스스로 409 를 낼 수 있다. 다만 양쪽 다 지금은
+  시끄럽게 실패하므로(intake 는 rc 밖 예외로, autofill 은 problems 에
+  실어 rc=1) 조용한 손실은 아니다. 사람이 data 브랜치를 손으로 건드리는
+  경우에도 물론 난다. 그럴 땐 조용히
   삼키지 않고 워크플로우가 눈에 보이게 실패하는 게 맞다 — 다만
   `urllib.error.HTTPError` 를 그대로 다시 던지면 `str(e)` 가
   `"HTTP Error 409: Conflict"` 뿐이라 실패 로그에 **어떤 경로**(`path`)가
